@@ -24,6 +24,8 @@
 #include "config.h"
 #endif
 
+#include <unicode/ucnv.h>
+
 #include "php.h"
 #include "php_ini.h"
 #include "ext/standard/php_string.h"
@@ -59,6 +61,7 @@ static PHP_MINFO_FUNCTION(mbstring_ng);
 static PHP_MB_FUNCTION(strtoupper);
 static PHP_MB_FUNCTION(strtolower);
 static PHP_MB_FUNCTION(internal_encoding);
+static PHP_MB_FUNCTION(preferred_mime_name);
 static PHP_MB_FUNCTION(parse_str);
 static PHP_MB_FUNCTION(output_handler);
 static PHP_MB_FUNCTION(strlen);
@@ -75,6 +78,7 @@ static PHP_MB_FUNCTION(strwidth);
 static PHP_MB_FUNCTION(strimwidth);
 static PHP_MB_FUNCTION(convert_encoding);
 static PHP_MB_FUNCTION(detect_encoding);
+static PHP_MB_FUNCTION(list_encodings);
 
 static PHP_MB_FUNCTION(regex_encoding);
 static PHP_MB_FUNCTION(ereg);
@@ -89,6 +93,10 @@ static void php_mb_regex_free_cache(php_mb_regex_t **pre);
 
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_internal_encoding, 0, 0, 0)
+	ZEND_ARG_INFO(0, encoding)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_preferred_mime_name, 0, 0, 1)
 	ZEND_ARG_INFO(0, encoding)
 ZEND_END_ARG_INFO()
 
@@ -204,10 +212,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_detect_encoding, 0, 0, 1)
 	ZEND_ARG_INFO(0, strict)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_convert_variables, 1, 0, 3)
-	ZEND_ARG_INFO(0, to)
-	ZEND_ARG_INFO(0, from)
-	ZEND_ARG_INFO(1, ...)
+ZEND_BEGIN_ARG_INFO(arginfo_mb_list_encodings, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_regex_encoding, 0, 0, 0)
@@ -292,6 +297,7 @@ const zend_function_entry mbstring_ng_functions[] = {
 	PHP_MB_FE(strtoupper,			arginfo_mb_strtoupper)
 	PHP_MB_FE(strtolower,			arginfo_mb_strtolower)
 	PHP_MB_FE(internal_encoding,	arginfo_mb_internal_encoding)
+	PHP_MB_FE(preferred_mime_name,	arginfo_mb_preferred_mime_name)
 	PHP_MB_FE(parse_str,			arginfo_mb_parse_str)
 	PHP_MB_FE(output_handler,		arginfo_mb_output_handler)
 	PHP_MB_FE(strlen,				arginfo_mb_strlen)
@@ -308,6 +314,7 @@ const zend_function_entry mbstring_ng_functions[] = {
 	PHP_MB_FE(strimwidth,			arginfo_mb_strimwidth)
 	PHP_MB_FE(convert_encoding,		arginfo_mb_convert_encoding)
 	PHP_MB_FE(detect_encoding,		arginfo_mb_detect_encoding)
+	PHP_MB_FE(list_encodings,		arginfo_mb_list_encodings)
 	PHP_MB_FE(regex_set_options,	arginfo_mb_regex_set_options)
 	PHP_MB_FE(ereg,					arginfo_mb_ereg)
 	PHP_MB_FE(eregi,				arginfo_mb_eregi)
@@ -466,6 +473,29 @@ PHP_MB_FUNCTION(internal_encoding)
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|s", &name, &name_len) == FAILURE) {
 		return;
 	}
+}
+/* }}} */
+
+/* {{{ proto string mb_preferred_mime_name(string encoding)
+   Return the preferred MIME name (charset) as a string */
+PHP_MB_FUNCTION(preferred_mime_name)
+{
+	char *name = NULL;
+	const char *retval;
+	int name_len;
+	UErrorCode err;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &name, &name_len) == FAILURE) {
+		return;
+	}
+
+	retval = ucnv_getStandardName(name, "IANA", &err);
+	if (!retval) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "No corresponding standard name for %s", name);
+		RETURN_FALSE;
+	}
+
+	RETURN_STRING(retval, 1);
 }
 /* }}} */
 
@@ -807,6 +837,18 @@ PHP_MB_FUNCTION(detect_encoding)
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|zb", &str, &str_len, &encoding_list, &strict) == FAILURE) {
 		return;
+	}
+}
+/* }}} */
+
+/* {{{ proto mixed mb_list_encodings()
+   Returns an array of all supported entity encodings */
+PHP_MB_FUNCTION(list_encodings)
+{
+	int i, n = ucnv_countAvailable();
+	array_init(return_value);
+	for (i = 0; i < n; i++) {
+		add_next_index_string(return_value, (char *) ucnv_getAvailableName(i), 1);
 	}
 }
 /* }}} */
