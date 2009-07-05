@@ -47,3 +47,12 @@ modules
 scan_makefile_in.awk
 *.gcda
 *.gcno
+phpt.*
+*.mem
+*.diff
+*.log
+*.exp
+*.out
+*.php
+*.gcda
+*.gcno
