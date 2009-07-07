@@ -515,7 +515,7 @@ PHP_MB_FUNCTION(preferred_mime_name)
 	char *name = NULL;
 	const char *retval;
 	int name_len;
-	UErrorCode err = -1;
+	UErrorCode err = U_ZERO_ERROR;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &name, &name_len) == FAILURE) {
 		return;
@@ -1921,7 +1921,7 @@ static int php_mb2_char_ptr_list_reserve(php_mb2_char_ptr_list *list, size_t new
 
 static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC)
 {
-	UErrorCode err = -1;
+	UErrorCode err = U_ZERO_ERROR;
 	UConverter *to_conv = NULL, *from_conv = NULL;
 	const char * const*from_encoding, * const*e;
 	char *dbuf, *pd, *pdl;
@@ -1969,6 +1969,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 			dbuf = new_dbuf;
 			pdl = new_dbuf + new_dbuf_size;
 
+			err = U_ZERO_ERROR;
 			ucnv_convertEx(to_conv, from_conv, &pd, pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), FALSE, FALSE, &err);
 		}
 		if (U_SUCCESS(err)) {
@@ -1976,6 +1977,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 				size_t new_dbuf_size;
 				char *new_dbuf;
 
+				err = U_ZERO_ERROR;
 				ucnv_convertEx(to_conv, from_conv, &pd, pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), FALSE, TRUE, &err);
 				if (U_SUCCESS(err) || err != U_BUFFER_OVERFLOW_ERROR) {
 					break;
