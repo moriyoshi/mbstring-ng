@@ -52,6 +52,14 @@
 extern zend_module_entry mbstring_ng_module_entry;
 #define mbstring_ng_module_ptr &mbstring_ng_module_entry
 
+typedef struct {
+    const char **items;
+    size_t nitems;
+    char *alloc;
+    size_t alloc_size;
+    int persistent:1;
+} php_mb2_char_ptr_list;
+
 ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
     struct {
         OnigEncoding default_mbctype;
@@ -61,7 +69,7 @@ ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
         OnigSyntaxType *default_syntax;
     } regex;
     struct {
-        char *detect_order;
+        php_mb2_char_ptr_list detect_order;
         char *http_input;
         char *http_output;
         char *internal_encoding;

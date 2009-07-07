@@ -58,6 +58,8 @@ static PHP_RINIT_FUNCTION(mbstring_ng);
 static PHP_RSHUTDOWN_FUNCTION(mbstring_ng);
 static PHP_MINFO_FUNCTION(mbstring_ng);
 
+static PHP_INI_MH(OnUpdate_mbstring2_detect_order);
+
 static PHP_MB_FUNCTION(strtoupper);
 static PHP_MB_FUNCTION(strtolower);
 static PHP_MB_FUNCTION(internal_encoding);
@@ -89,7 +91,14 @@ static PHP_MB_FUNCTION(split);
 static PHP_MB_FUNCTION(ereg_match);
 static PHP_MB_FUNCTION(regex_set_options);
 
-static void php_mb_regex_free_cache(php_mb_regex_t **pre);
+static void php_mb2_char_ptr_list_ctor(php_mb2_char_ptr_list *list, int persistent);
+static void php_mb2_char_ptr_list_dtor(php_mb2_char_ptr_list *list);
+static int php_mb2_char_ptr_list_reserve(php_mb2_char_ptr_list *list, size_t nitems_grow, size_t alloc_size_grow);
+
+static void php_mb2_regex_free_cache(php_mb_regex_t **pre);
+static int php_mb2_parse_encoding_list(const char *value, size_t value_length, php_mb2_char_ptr_list *pretval, int persistent);
+static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pretval TSRMLS_DC);
+static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC);
 
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_internal_encoding, 0, 0, 0)
@@ -351,8 +360,8 @@ ZEND_GET_MODULE(mbstring_ng)
 
 /* {{{ php.ini directive registration */
 PHP_INI_BEGIN()
-	STD_PHP_MB_INI_ENTRY("detect_order", NULL, PHP_INI_ALL,
-						OnUpdateString, ini.detect_order,
+	STD_PHP_MB_INI_ENTRY("detect_order", "", PHP_INI_ALL,
+						OnUpdate_mbstring2_detect_order, ini.detect_order,
 						zend_mbstring_ng_globals, mbstring_ng_globals)
 	STD_PHP_MB_INI_ENTRY("http_input", "pass", PHP_INI_ALL,
 						OnUpdateString, ini.http_output,
@@ -381,11 +390,13 @@ PHP_INI_END()
 /* {{{ module global initialize handler */
 static PHP_GINIT_FUNCTION(mbstring_ng)
 {
+	php_mb2_char_ptr_list_ctor(&mbstring_ng_globals->ini.detect_order, 1);
+
 	mbstring_ng_globals->regex.default_mbctype = ONIG_ENCODING_EUC_JP;
 	mbstring_ng_globals->regex.current_mbctype = ONIG_ENCODING_EUC_JP;
 	mbstring_ng_globals->regex.default_options = ONIG_OPTION_MULTILINE | ONIG_OPTION_SINGLELINE;
 	mbstring_ng_globals->regex.default_syntax = ONIG_SYNTAX_RUBY;
-	zend_hash_init(&(mbstring_ng_globals->regex.ht_rc), 0, NULL, (void (*)(void *)) php_mb_regex_free_cache, 1);
+	zend_hash_init(&(mbstring_ng_globals->regex.ht_rc), 0, NULL, (void (*)(void *)) php_mb2_regex_free_cache, 1);
 }
 /* }}} */
 
@@ -393,6 +404,8 @@ static PHP_GINIT_FUNCTION(mbstring_ng)
 static PHP_GSHUTDOWN_FUNCTION(mbstring_ng)
 {
 	zend_hash_destroy(&mbstring_ng_globals->regex.ht_rc);
+
+	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.detect_order);
 }
 /* }}} */
 
@@ -463,6 +476,25 @@ static PHP_MINFO_FUNCTION(mbstring_ng)
 }
 /* }}} */
 
+/* {{{ static PHP_INI_MH(OnUpdate_mbstring2_detect_order) */
+static PHP_INI_MH(OnUpdate_mbstring2_detect_order)
+{
+	php_mb2_char_ptr_list new_list;
+	int res = php_mb2_parse_encoding_list(new_value, (size_t)new_value_length, &new_list, 1 TSRMLS_CC);
+
+	php_mb2_char_ptr_list_dtor(&MBSTR_NG(ini).detect_order);
+
+	if (SUCCESS == res) {
+		MBSTR_NG(ini).detect_order = new_list;
+	} else {
+		php_mb2_char_ptr_list_ctor(&MBSTR_NG(ini).detect_order, 1);
+	}
+
+	return SUCCESS;
+}
+/* }}} */
+
+
 /* {{{ proto string mb_internal_encoding([string encoding])
    Sets the current internal encoding or Returns the current internal encoding as a string */
 PHP_MB_FUNCTION(internal_encoding)
@@ -483,7 +515,7 @@ PHP_MB_FUNCTION(preferred_mime_name)
 	char *name = NULL;
 	const char *retval;
 	int name_len;
-	UErrorCode err;
+	UErrorCode err = -1;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &name, &name_len) == FAILURE) {
 		return;
@@ -780,15 +812,32 @@ PHP_MB_FUNCTION(strimwidth)
    Returns converted string in desired encoding */
 PHP_MB_FUNCTION(convert_encoding)
 {
-	char *arg_str;
-	char *arg_new;
+	char *str;
+	char *to_enc;
 	int str_len;
-	int new_len;
-	zval *arg_old;
+	int to_enc_len;
+	zval *from_enc;
+	php_mb2_char_ptr_list from_encodings;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|z", &arg_str, &str_len, &arg_new, &new_len, &arg_old) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|z", &str, &str_len, &to_enc, &to_enc_len, &from_enc) == FAILURE) {
 		return;
 	}
+
+	if (FAILURE == php_mb2_zval_to_encoding_list(from_enc, &from_encodings TSRMLS_CC)) {
+		RETURN_FALSE;
+	}
+
+	{
+		char *result;
+		size_t result_len;
+		if (SUCCESS == php_mb2_convert_encoding(str, str_len, to_enc, from_encodings.items, from_encodings.nitems, &result, &result_len, 0 TSRMLS_CC)) {
+			RETVAL_STRINGL(result, result_len, 0);
+		} else {
+			RETVAL_FALSE;
+		}
+	}
+
+	php_mb2_char_ptr_list_dtor(&from_encodings);
 }
 /* }}} */
 
@@ -1320,7 +1369,7 @@ _php_mb_regex_init_options(const char *parg, int narg, OnigOptionType *option, O
 /* }}} */
 
 /* {{{ static void php_mb_regex_free_cache() */
-static void php_mb_regex_free_cache(php_mb_regex_t **pre) 
+static void php_mb2_regex_free_cache(php_mb_regex_t **pre) 
 {
 	onig_free(*pre);
 }
@@ -1815,6 +1864,353 @@ PHP_MB_FUNCTION(regex_set_options)
 }
 /* }}} */
 
+static void php_mb2_char_ptr_list_ctor(php_mb2_char_ptr_list *list, int persistent)
+{
+	list->items = NULL;
+	list->nitems = 0;
+	list->alloc = NULL;
+	list->alloc_size = 0;
+	list->persistent = persistent;
+}
+
+static void php_mb2_char_ptr_list_dtor(php_mb2_char_ptr_list *list)
+{
+	if (list->items) {
+		pefree(list->items, list->persistent);
+	}
+	if (list->alloc) {
+		pefree(list->alloc, list->persistent);
+	}
+}
+
+static int php_mb2_char_ptr_list_reserve(php_mb2_char_ptr_list *list, size_t new_nitems, size_t new_alloc_size)
+{
+	const char **new_items;
+	char *new_alloc;
+	size_t i, n;
+
+	new_items = safe_pemalloc(new_nitems, sizeof(char *), sizeof(char *), list->persistent);
+	if (!new_items) {
+		return FAILURE;
+	}
+	new_alloc = safe_pemalloc(new_alloc_size, sizeof(char), sizeof(char), list->persistent);
+	if (!new_alloc) {
+		pefree(new_items, list->persistent);
+		return FAILURE;
+	}
+
+	memmove(new_alloc, list->alloc, list->alloc_size);
+
+	for (i = 0, n = list->nitems; i < n; i++) {
+		new_items[i] = new_alloc + (list->items[i] - list->alloc);
+	}
+	new_items[new_nitems] = 0;
+
+	if (list->items) {
+		pefree(list->items, list->persistent);
+	}
+	if (list->alloc) {
+		pefree(list->alloc, list->persistent);
+	}
+
+	list->items = new_items;
+	list->alloc = new_alloc;
+
+	return SUCCESS;
+}
+
+static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC)
+{
+	UErrorCode err = -1;
+	UConverter *to_conv = NULL, *from_conv = NULL;
+	const char * const*from_encoding, * const*e;
+	char *dbuf, *pd, *pdl;
+	const char *ps, *psl;
+
+	to_conv = ucnv_open(to_encoding, &err);
+	if (!to_conv) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to create the encoder for %s (error: %s)", to_encoding, u_errorName(err));
+		return FAILURE;
+	}
+
+	dbuf = pemalloc(length + 1, persistent);
+	if (!dbuf)
+		goto fail;
+
+	psl = input + length;
+	pdl = dbuf + length;
+	if (pdl < dbuf) {
+		goto fail;
+	}
+
+	for (from_encoding = from_encodings, e = from_encodings + num_from_encodings; from_encoding < e; from_encoding++) {
+		UChar pvbuf[1024];
+		UChar *ppvs, *ppvd;
+
+		from_conv = ucnv_open(*from_encoding, &err);
+		if (!from_conv) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to create the decoder for %s (error: %s)", *from_encoding, u_errorName(err));
+			goto fail;
+		}
+
+		ps = input;
+		pd = dbuf;
+
+		ucnv_convertEx(to_conv, from_conv, &pd, pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), TRUE, FALSE, &err);
+		while (err == U_BUFFER_OVERFLOW_ERROR) {
+			size_t new_dbuf_size;
+			char *new_dbuf;
+			new_dbuf_size = (pdl - dbuf) << 1;
+			if (new_dbuf_size + 1 < pdl - dbuf || !(new_dbuf = perealloc(dbuf, new_dbuf_size + 1, persistent))) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion results");
+				goto fail;
+			}
+			pd = new_dbuf + (pd - dbuf);
+			dbuf = new_dbuf;
+			pdl = new_dbuf + new_dbuf_size;
+
+			ucnv_convertEx(to_conv, from_conv, &pd, pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), FALSE, FALSE, &err);
+		}
+		if (U_SUCCESS(err)) {
+			for (;;) {
+				size_t new_dbuf_size;
+				char *new_dbuf;
+
+				ucnv_convertEx(to_conv, from_conv, &pd, pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), FALSE, TRUE, &err);
+				if (U_SUCCESS(err) || err != U_BUFFER_OVERFLOW_ERROR) {
+					break;
+				}
+
+				new_dbuf_size = (pdl - dbuf) << 1;
+				if (new_dbuf_size + 1< pdl - dbuf || !(new_dbuf = perealloc(dbuf, new_dbuf_size + 1, persistent))) {
+					php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion results");
+					goto fail;
+				}
+				pd = new_dbuf + (pd - dbuf);
+				dbuf = new_dbuf;
+				pdl = new_dbuf + new_dbuf_size;
+			}
+		}
+		if (U_SUCCESS(err)) {
+			break;
+		}
+		if (err != U_ILLEGAL_CHAR_FOUND && err != U_ILLEGAL_ESCAPE_SEQUENCE && err != U_TRUNCATED_CHAR_FOUND && err != U_UNSUPPORTED_ESCAPE_SEQUENCE) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to create the decoder for %s (error: %s)", to_encoding, u_errorName(err));
+			goto fail;
+		}
+
+		ucnv_close(from_conv);
+		from_conv = NULL;
+	}
+
+	if (from_encoding == e) {
+		if (num_from_encodings == 1) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert from %s to %s (error: %s)", *from_encodings, to_encoding, u_errorName(err));
+		} else {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "No suitable converter ifound (last error: %s)", u_errorName(err));
+		}
+		goto fail;
+	}
+
+	*pd = '\0';
+
+	*output = dbuf;
+	*output_len = pd - dbuf; 
+
+	if (to_conv) {
+		ucnv_close(to_conv);
+	}
+
+	return SUCCESS;
+
+fail:
+	if (dbuf) {
+		pefree(dbuf, persistent);
+	}
+	if (to_conv) {
+		ucnv_close(to_conv);
+	}
+	if (from_conv) {
+		ucnv_close(from_conv);
+	}
+	return FAILURE;
+}
+
+static int php_mb2_parse_encoding_list(const char *value, size_t value_length, php_mb2_char_ptr_list *pretval, int persistent)
+{
+	int n;
+	const char *endp, *startp;
+	php_mb2_char_ptr_list retval; 
+
+	php_mb2_char_ptr_list_ctor(&retval, persistent);
+
+	startp = value;
+	endp = value + value_length;
+
+	n = 1;
+	{
+		const char *p = startp;
+		while ((p = php_memnstr((char*)p, ",", 1, (char*)endp)) != NULL) {
+			p++;
+			n++;
+		}
+	}
+
+	retval.items = safe_pemalloc(n, sizeof(char *), sizeof(char *), persistent);
+	if (!retval.items) {
+		return FAILURE;
+	}
+
+	retval.alloc = safe_pemalloc(value_length, sizeof(char), sizeof(char), persistent);
+	if (!retval.alloc) {
+		pefree(retval.items, persistent);
+		return FAILURE;
+	}
+	retval.alloc_size = value_length;
+
+	{
+		char *pa = retval.alloc;
+		const char *p1, *p2;
+		const char **entry = retval.items;
+		int bauto = FALSE;
+
+		n = 0;
+		bauto = 0;
+		p1 = startp;
+
+		while (p1 < endp) {
+			const char *pn = php_memnstr((char*)p1, ",", 1, (char*)endp);
+			if (pn == NULL) {
+				pn = endp;
+			}
+
+			/* trim spaces */
+			while (p1 < p2 && (*p1 == ' ' || *p1 == '\t')) {
+				p1++;
+			}
+
+			p2 = pn;
+			do {
+				--p2;
+			} while (p2 > p1 && (*p2 == ' ' || *p2 == '\t'));
+			++p2;
+
+			{
+				size_t l = p2 - p1;
+				if (l > 0) {
+					memmove(pa, p1, l);
+					*(pa + l) = '\0';
+					*entry++ = pa;
+					pa += l + 1;
+					retval.nitems++;
+				}
+			}
+			p1 = pn + 1;
+		}
+		*entry = NULL;
+	}
+
+	*pretval = retval;
+	return SUCCESS;
+}
+
+static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pretval TSRMLS_DC)
+{
+	php_mb2_char_ptr_list retval;
+
+	if (Z_TYPE_P(repr) == IS_STRING) {
+		if (FAILURE == php_mb2_parse_encoding_list(Z_STRVAL_P(repr), (size_t)Z_STRLEN_P(repr), &retval, FALSE)) {
+			return FAILURE;
+		}
+	} else if (Z_TYPE_P(repr) == IS_ARRAY) {
+		HashTable *ht = Z_ARRVAL_P(repr);
+		HashPosition p;
+		zval **data;
+		size_t i;
+		char *pa;
+		const char **entry;
+
+		php_mb2_char_ptr_list_ctor(&retval, 0);
+
+		retval.items = safe_pemalloc(ht->nNumOfElements, sizeof(char *), sizeof(char *), retval.persistent);
+		if (!retval.items) {
+			return FAILURE;
+		}
+		retval.nitems = ht->nNumOfElements;
+
+		retval.alloc_size = 0;
+		for (zend_hash_internal_pointer_reset_ex(ht, &p);
+				SUCCESS == zend_hash_get_current_data_ex(ht, (void**)&data, &p);
+				zend_hash_move_forward_ex(ht, &p)) {
+			if (Z_TYPE_PP(data) != IS_STRING) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Every element of the array must be a string");
+				php_mb2_char_ptr_list_dtor(&retval);
+				return FAILURE;
+			}
+			retval.alloc_size += Z_STRLEN_PP(data) + 1;
+			if (retval.alloc_size < Z_STRLEN_PP(data) + 1) {
+				php_mb2_char_ptr_list_dtor(&retval);
+				return FAILURE;
+			}
+		}
+
+		retval.alloc = safe_pemalloc(retval.alloc_size, sizeof(char), sizeof(char), retval.persistent);
+		if (!retval.alloc) {
+			php_mb2_char_ptr_list_dtor(&retval);
+			return FAILURE;
+		}
+
+		pa = retval.alloc;
+		entry = retval.items;
+		for (zend_hash_internal_pointer_reset_ex(ht, &p);
+				SUCCESS == zend_hash_get_current_data_ex(ht, (void**)&data, &p);
+				zend_hash_move_forward_ex(ht, &p)) {
+			size_t l = Z_STRLEN_PP(data) + 1;
+			assert(Z_TYPE_PP(data) == IS_STRING);
+			memmove(pa, Z_STRVAL_PP(data), l);
+			*entry++ = pa;	
+			pa += l;
+		}
+	} else {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Type of the encoding list must be either array or string");
+		return FAILURE;
+	}
+	{
+		size_t i, j;
+		for (i = 0; i < retval.nitems; i++) {
+			if (strcasecmp(retval.items[i], "auto") == 0) {
+				char *pa;
+				php_mb2_char_ptr_list *detect_order = &MBSTR_NG(ini).detect_order;
+				size_t new_nitems = retval.nitems + detect_order->nitems;
+				size_t new_alloc_size = retval.alloc_size + detect_order->alloc_size;
+				if (new_nitems < retval.nitems || new_alloc_size < retval.alloc_size) {
+					php_mb2_char_ptr_list_dtor(&retval);
+					return FAILURE;
+				}
+
+				if (FAILURE == php_mb2_char_ptr_list_reserve(&retval, new_nitems, new_alloc_size)) {
+					php_mb2_char_ptr_list_dtor(&retval);
+					return FAILURE;
+				}
+				memmove(&retval.items[i + 1] + detect_order->nitems, &retval.items[i + 1], sizeof(char *) * (retval.nitems - i - 1));
+				pa = retval.alloc + retval.alloc_size;
+				for (j = 0; j < detect_order->nitems; j++) {
+					size_t l = strlen(detect_order->items[j]) + 1;
+					memmove(pa, detect_order->items[j], l);
+					retval.items[i + j] = pa;
+					pa += l;
+				}
+				retval.nitems = new_nitems;
+				retval.alloc_size = pa - retval.alloc;
+				i += detect_order->nitems;
+				--i;
+			}
+		}
+	}
+
+	*pretval = retval;
+	return SUCCESS;
+}
 
 #endif	/* HAVE_MBSTRING */
 
