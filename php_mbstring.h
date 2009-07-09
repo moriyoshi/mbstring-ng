@@ -12,7 +12,7 @@
    | obtain it through the world-wide-web, please send a note to          |
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
-   | Author: Tsukada Takuya <tsukada@fminn.nagano.nagano.jp>              |
+   | Author: Moriyoshi Koizumi <moriyoshi@php.net>                        |
    +----------------------------------------------------------------------+
  */
 
@@ -31,6 +31,7 @@
 #include "php_onig_compat.h"
 #include <oniguruma.h>
 #undef UChar
+#include <unicode/utypes.h>
 
 #ifdef PHP_WIN32
 #	undef MBSTRING_NG_API
@@ -53,6 +54,13 @@ extern zend_module_entry mbstring_ng_module_entry;
 #define mbstring_ng_module_ptr &mbstring_ng_module_entry
 
 typedef struct {
+    UChar *p;
+    int32_t len;
+    int32_t nalloc;
+    int persistent;
+} php_mb2_ustring;
+
+typedef struct {
     const char **items;
     size_t nitems;
     char *alloc;
@@ -70,13 +78,16 @@ ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
     } regex;
     struct {
         php_mb2_char_ptr_list detect_order;
-        char *http_input;
+        php_mb2_char_ptr_list http_input;
         char *http_output;
         char *internal_encoding;
-        char *substitute_character;
+        php_mb2_ustring substitute_character;
         zend_bool encoding_translation;
         char *http_output_conv_mimetypes;
     } ini;
+    struct {
+        int in_ucnv_error_handler;
+    } runtime;
 ZEND_END_MODULE_GLOBALS(mbstring_ng)
 
 #ifdef ZTS
