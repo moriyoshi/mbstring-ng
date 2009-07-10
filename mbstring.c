@@ -26,6 +26,7 @@
 #endif
 
 #include <unicode/ucnv.h>
+#include <unicode/ucsdet.h>
 
 #include "php.h"
 #include "php_ini.h"
@@ -101,6 +102,7 @@ static void php_mb2_regex_free_cache(php_mb_regex_t **pre);
 static int php_mb2_parse_encoding_list(const char *value, size_t value_length, php_mb2_char_ptr_list *pretval, int persistent);
 static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pretval TSRMLS_DC);
 static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC);
+static char *php_mb2_detect_encoding(const char *input, size_t length, const char * const *from_encodings, size_t num_from_encodings TSRMLS_DC);
 static int php_mb2_ustring_ctor(php_mb2_ustring *str, int persistent);
 static int php_mb2_ustring_appendu(php_mb2_ustring *, const UChar *ustr, int32_t len);
 static int php_mb2_ustring_appendn(php_mb2_ustring *, const char *str, int32_t len, UConverter *from_conv);
@@ -941,10 +943,22 @@ PHP_MB_FUNCTION(detect_encoding)
 	int str_len;
 	zend_bool strict=0;
 	zval *encoding_list;
+	php_mb2_char_ptr_list hints;
+	char *retval;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|zb", &str, &str_len, &encoding_list, &strict) == FAILURE) {
 		return;
 	}
+
+	if (FAILURE == php_mb2_zval_to_encoding_list(encoding_list, &hints TSRMLS_CC)) {
+		RETURN_FALSE;
+	}
+
+	retval = php_mb2_detect_encoding(str, str_len, hints.items, hints.nitems TSRMLS_CC);
+	php_mb2_char_ptr_list_dtor(&hints);
+	if (!retval)
+		RETURN_FALSE;
+	RETURN_STRING(retval, 0);
 }
 /* }}} */
 
@@ -2334,6 +2348,119 @@ fail:
 		ucnv_close(from_conv);
 	}
 	return FAILURE;
+}
+
+static int php_mb2_int32_data_compare(const HashPosition *a, const HashPosition *b TSRMLS_DC)
+{
+	const int32_t av = *(int32_t *)((*a)->pData), bv = *(int32_t *)((*b)->pData);
+	return av > bv ? -1: av < bv ? 1: 0;
+}
+
+static char *php_mb2_detect_encoding(const char *input, size_t length, const char * const *hint_encodings, size_t num_hint_encodings TSRMLS_DC)
+{
+	UErrorCode err = U_ZERO_ERROR;
+	UCharsetDetector *det;
+	const char * const *encoding, * const *e;
+	char *retval = NULL;
+	HashTable score_table;
+
+	if ((int32_t)length < 0) {
+		return NULL;
+	}
+
+	if (FAILURE == zend_hash_init(&score_table, sizeof(int32_t), NULL, NULL, FALSE)) {
+		return NULL;
+	}
+
+	det = ucsdet_open(&err);
+	if (!det) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to create charset detector (error: %s)", u_errorName(err));
+		zend_hash_destroy(&score_table);
+		return NULL;
+	}
+
+	ucsdet_setText(det, input, length, &err);
+	if (U_FAILURE(err)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to feed the input string to the detector (error: %s)", u_errorName(err));
+		goto out;
+	}
+
+	if (num_hint_encodings > 0) {
+		HashPosition pos;
+		const char *name;
+		uint name_len;
+
+		for (encoding = hint_encodings, e = hint_encodings + num_hint_encodings;
+				encoding < e; encoding++) {
+			int32_t i, nmatches;
+			const UCharsetMatch **matches;
+
+			ucsdet_setDeclaredEncoding(det, *encoding, strlen(*encoding), &err);
+			if (U_FAILURE(err)) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to give a hint to the detector (error: %s)", u_errorName(err));
+				goto out;
+			}
+
+			matches = ucsdet_detectAll(det, &nmatches, &err);
+			if (U_FAILURE(err)) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "An error occurred during detecting the encoding (error: %s)", u_errorName(err));
+				goto out;
+			}
+
+			for (i = 0; i < nmatches; i++) {
+				int32_t score, *prev_value;
+				ulong name_h;
+
+				name = ucsdet_getName(matches[i], &err);
+				if (U_FAILURE(err)) {
+					php_error_docref(NULL TSRMLS_CC, E_WARNING, "An error occurred during detecting the encoding (error: %s)", u_errorName(err));
+					goto out;
+				}
+				score = ucsdet_getConfidence(matches[i], &err);
+				if (U_FAILURE(err)) {
+					php_error_docref(NULL TSRMLS_CC, E_WARNING, "An error occurred during detecting the encoding (error: %s)", u_errorName(err));
+					goto out;
+				}
+				name_len = strlen(name) + 1;
+				name_h = zend_inline_hash_func(name, name_len);
+				if (FAILURE == zend_hash_quick_find(&score_table, name, name_len, name_h, (void **)&prev_value)) {
+					zend_hash_quick_add(&score_table, name, name_len, name_h, &score, sizeof(score), NULL);
+				} else {
+					*prev_value += score;
+				}
+			}
+		}
+
+		zend_hash_sort(&score_table, zend_qsort, (compare_func_t)php_mb2_int32_data_compare, 0 TSRMLS_CC);
+
+		zend_hash_internal_pointer_reset_ex(&score_table, &pos);
+		assert(HASH_KEY_NON_EXISTANT != zend_hash_get_current_key_ex(&score_table, (char **)&name, &name_len, NULL, FALSE, &pos));
+		retval = estrndup(name, name_len - 1);
+	} else {
+		const char *name;
+		const UCharsetMatch *match;
+		
+		match = ucsdet_detect(det, &err);
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "An error occurred during detecting the encoding (error: %s)", u_errorName(err));
+			goto out;
+		}
+
+		name = ucsdet_getName(match, &err);
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "An error occurred during detecting the encoding (error: %s)", u_errorName(err));
+			goto out;
+		}
+
+		retval = estrdup(name);
+	}
+
+out:
+	zend_hash_destroy(&score_table);
+	if (det) {
+		ucsdet_close(det);
+	}
+	return retval;
 }
 
 static int php_mb2_parse_encoding_list(const char *value, size_t value_length, php_mb2_char_ptr_list *pretval, int persistent)
