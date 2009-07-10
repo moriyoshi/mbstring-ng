@@ -2174,8 +2174,7 @@ static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterT
 	case UCNV_IRREGULAR:
 	case UCNV_ILLEGAL:
 		if (args->targetLimit - args->target < ctx->subst_char_u_len) {
-			*err = U_MEMORY_ALLOCATION_ERROR;
-			break;
+			args->targetLimit = args->target + ctx->subst_char_u_len;
 		}
 		memmove(args->target, ctx->subst_char_u, sizeof(UChar) * ctx->subst_char_u_len);
 		args->target += ctx->subst_char_u_len;
@@ -2188,13 +2187,15 @@ static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterT
 
 static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC)
 {
+	static const size_t pvbuf_basic_len = 1024;
 	UErrorCode err = U_ZERO_ERROR;
 	const char * const*from_encoding, * const*e;
 	UConverter *to_conv = NULL, *from_conv = NULL;
-	UChar pvbuf[1024];
+	UChar *pvbuf;
 	UChar *ppvs, *ppvd;
 	char *pd;
 	const char *ps, *psl;
+	int use_heap = 0;
 
 	php_mb2_uconverter_callback_ctx ctx;
 	ctx.dbuf = NULL;
@@ -2206,10 +2207,16 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 #endif
 	MBSTR_NG(runtime).in_ucnv_error_handler = FALSE;
 
+	if (pvbuf_basic_len + ctx.subst_char_u_len < pvbuf_basic_len || sizeof(UChar) * (pvbuf_basic_len + ctx.subst_char_u_len) / sizeof(UChar) != pvbuf_basic_len + ctx.subst_char_u_len) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer", to_encoding, u_errorName(err));
+		return FAILURE;
+	}
+	pvbuf = do_alloca_ex(sizeof(UChar) * (pvbuf_basic_len + ctx.subst_char_u_len), 4096, use_heap);
+
 	to_conv = ucnv_open(to_encoding, &err);
 	if (!to_conv) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to create the encoder for %s (error: %s)", to_encoding, u_errorName(err));
-		return FAILURE;
+		goto fail;
 	}
 
 	ucnv_setFromUCallBack(to_conv, (UConverterFromUCallback)php_mb2_uconverter_from_unicode_callback, &ctx, NULL, NULL, &err);
@@ -2245,7 +2252,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 		ps = input;
 		pd = ctx.dbuf;
 
-		ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), TRUE, FALSE, &err);
+		ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + pvbuf_basic_len, TRUE, FALSE, &err);
 		while (err == U_BUFFER_OVERFLOW_ERROR) {
 			size_t new_dbuf_size;
 			char *new_dbuf;
@@ -2259,7 +2266,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 			ctx.pdl = new_dbuf + new_dbuf_size;
 
 			err = U_ZERO_ERROR;
-			ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), FALSE, FALSE, &err);
+			ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + pvbuf_basic_len, FALSE, FALSE, &err);
 		}
 		if (U_SUCCESS(err)) {
 			for (;;) {
@@ -2267,7 +2274,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 				char *new_dbuf;
 
 				err = U_ZERO_ERROR;
-				ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + sizeof(pvbuf) / sizeof(*pvbuf), FALSE, TRUE, &err);
+				ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + pvbuf_basic_len, FALSE, TRUE, &err);
 				if (U_SUCCESS(err) || err != U_BUFFER_OVERFLOW_ERROR) {
 					break;
 				}
@@ -2312,9 +2319,11 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 		ucnv_close(to_conv);
 	}
 
+	free_alloca(pvbuf, use_heap);
 	return SUCCESS;
 
 fail:
+	free_alloca(pvbuf, use_heap);
 	if (ctx.dbuf) {
 		pefree(ctx.dbuf, persistent);
 	}
