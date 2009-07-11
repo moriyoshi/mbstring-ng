@@ -91,7 +91,6 @@ static PHP_MB_FUNCTION(ereg_replace);
 static PHP_MB_FUNCTION(eregi_replace);
 static PHP_MB_FUNCTION(split);
 static PHP_MB_FUNCTION(ereg_match);
-static PHP_MB_FUNCTION(regex_set_options);
 
 static void php_mb2_char_ptr_list_ctor(php_mb2_char_ptr_list *list, int persistent);
 static void php_mb2_char_ptr_list_dtor(php_mb2_char_ptr_list *list);
@@ -297,10 +296,6 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_ereg_search_setpos, 0, 0, 1)
 	ZEND_ARG_INFO(0, position)
 ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_regex_set_options, 0, 0, 0)
-	ZEND_ARG_INFO(0, options)
-ZEND_END_ARG_INFO()
 /* }}} */
 
 /* {{{ zend_function_entry mbstring_ng_functions[] */
@@ -326,7 +321,6 @@ const zend_function_entry mbstring_ng_functions[] = {
 	PHP_MB_FE(convert_encoding,		arginfo_mb_convert_encoding)
 	PHP_MB_FE(detect_encoding,		arginfo_mb_detect_encoding)
 	PHP_MB_FE(list_encodings,		arginfo_mb_list_encodings)
-	PHP_MB_FE(regex_set_options,	arginfo_mb_regex_set_options)
 	PHP_MB_FE(ereg,					arginfo_mb_ereg)
 	PHP_MB_FE(eregi,				arginfo_mb_eregi)
 	PHP_MB_FE(ereg_replace,			arginfo_mb_ereg_replace)
