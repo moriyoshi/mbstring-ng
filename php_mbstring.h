@@ -28,9 +28,6 @@
 
 #if HAVE_MBSTRING_NG
 
-#include "php_onig_compat.h"
-#include <oniguruma.h>
-#undef UChar
 #include <unicode/utypes.h>
 
 #ifdef PHP_WIN32
@@ -69,13 +66,6 @@ typedef struct {
 } php_mb2_char_ptr_list;
 
 ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
-    struct {
-        OnigEncoding default_mbctype;
-        OnigEncoding current_mbctype;
-        HashTable ht_rc;
-        OnigOptionType default_options;
-        OnigSyntaxType *default_syntax;
-    } regex;
     struct {
         php_mb2_char_ptr_list detect_order;
         php_mb2_char_ptr_list http_input;
