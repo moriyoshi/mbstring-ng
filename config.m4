@@ -224,7 +224,7 @@ PHP_ARG_WITH(onig, [for external oniguruma],
                             If DIR is not set, the bundled oniguruma will be used], no, no)
 
 if test "$PHP_MBSTRING" != "no"; then  
-  AC_DEFINE([HAVE_MBSTRING],1,[whether to have multibyte string support])
+  AC_DEFINE([HAVE_MBSTRING_NG],1,[whether to have multibyte string support])
 
   PHP_MBSTRING_NG_ADD_BASE_SOURCES([mbstring.c])
   PHP_MBSTRING_NG_ADD_INSTALL_HEADERS([php_mbstring.h])
