@@ -101,6 +101,7 @@ static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pret
 static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC);
 static char *php_mb2_detect_encoding(const char *input, size_t length, const char * const *from_encodings, size_t num_from_encodings TSRMLS_DC);
 static int php_mb2_ustring_ctor(php_mb2_ustring *str, int persistent);
+static int php_mb2_ustring_ctor_from_n(php_mb2_ustring *, const char *str, int32_t len, const char *encoding, int persistent);
 static int php_mb2_ustring_appendu(php_mb2_ustring *, const UChar *ustr, int32_t len);
 static int php_mb2_ustring_appendn(php_mb2_ustring *, const char *str, int32_t len, UConverter *from_conv);
 static void php_mb2_ustring_dtor(php_mb2_ustring *str);
@@ -489,27 +490,9 @@ static PHP_INI_MH(php_mb2_OnUpdateUnicodeString)
 	UErrorCode err;
 	UConverter *conv;
 
-	conv = ucnv_open(MBSTR_NG(ini).internal_encoding ? MBSTR_NG(ini).internal_encoding: "ASCII", &err);
-	if (!conv) {
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&new_value_ustr, new_value, new_value_length, MBSTR_NG(ini).internal_encoding ? MBSTR_NG(ini).internal_encoding: "ASCII", 1)) {
 		return FAILURE;
 	}
-
-	php_mb2_ustring_ctor(&new_value_ustr, 1);
-
-	if (new_value != NULL) {
-		if (FAILURE == php_mb2_ustring_appendn(&new_value_ustr, new_value, new_value_length, conv)) {
-			ucnv_close(conv);
-			php_mb2_ustring_dtor(&new_value_ustr);
-			return FAILURE;
-		}
-		if (FAILURE == php_mb2_ustring_appendn(p, NULL, 0, conv)) {
-			ucnv_close(conv);
-			php_mb2_ustring_dtor(&new_value_ustr);
-			return FAILURE;
-		}
-	}
-
-	ucnv_close(conv);
 	php_mb2_ustring_dtor(p);
 	*p = new_value_ustr;
 
@@ -1044,6 +1027,39 @@ static int php_mb2_ustring_ctor(php_mb2_ustring *str, int persistent)
 	str->nalloc = 0;
 	str->persistent = persistent;
 	return SUCCESS;
+}
+
+static int php_mb2_ustring_ctor_from_n(php_mb2_ustring *ustr, const char *val, int32_t len, const char *encoding, int persistent)
+{
+	UErrorCode err = U_ZERO_ERROR;
+	UConverter *conv = NULL;
+
+	conv = ucnv_open(encoding, &err);
+	if (!conv) {
+		return FAILURE;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor(ustr, persistent)) {
+		ucnv_close(conv);
+		return FAILURE;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(ustr, val, len, conv)) {
+		goto fail;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(ustr, NULL, 0, conv)) {
+		goto fail;
+	}
+
+	ucnv_close(conv);
+	return SUCCESS;	
+fail:
+	if (conv) {
+		ucnv_close(conv);
+	}
+	php_mb2_ustring_dtor(ustr);
+	return FAILURE;
 }
 
 static void php_mb2_ustring_dtor(php_mb2_ustring *str)
