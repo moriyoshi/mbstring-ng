@@ -27,6 +27,7 @@
 
 #include <unicode/ucnv.h>
 #include <unicode/ucsdet.h>
+#include <unicode/ustring.h>
 
 #include "php.h"
 #include "php_ini.h"
@@ -573,10 +574,20 @@ PHP_MB_FUNCTION(strlen)
 	int string_len;
 	char *enc_name = NULL;
 	int enc_name_len;
+	php_mb2_ustring ustr;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|s", &string_val, &string_len, &enc_name, &enc_name_len) == FAILURE) {
 		return;
 	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&ustr, string_val, string_len, enc_name, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert the input to Unicode");
+		RETURN_FALSE;
+	}
+
+	RETVAL_LONG(u_countChar32(ustr.p, ustr.len));
+
+	php_mb2_ustring_dtor(&ustr);
 }
 /* }}} */
 
