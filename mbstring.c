@@ -771,7 +771,7 @@ PHP_MB_FUNCTION(substr)
 	int encoding_len;
 	long from, len;
 	php_mb2_ustring ustr;
-	const UChar *start, *end;
+	const UChar *start;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|ls", &str, &str_len, &from, &len, &encoding, &encoding_len) == FAILURE) {
 		return;
@@ -794,7 +794,10 @@ PHP_MB_FUNCTION(substr)
 		}
 	}
 
-	if (start + len > ustr.p + ustr.len) {
+	if (len < 0) {
+		const UChar *end = php_mb2_ustring_roffset(&ustr, -len);
+		len = end ? end - start: 0;
+	} else if (start + len > ustr.p + ustr.len) {
 		len = (ustr.p + ustr.len) - start;
 	}
 
