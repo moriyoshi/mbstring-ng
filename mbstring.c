@@ -370,7 +370,7 @@ PHP_INI_BEGIN()
 						php_mb2_OnUpdateEncodingList, ini.detect_order,
 						zend_mbstring_ng_globals, mbstring_ng_globals)
 	STD_PHP_MB_INI_ENTRY("http_input", "pass", PHP_INI_ALL,
-						php_mb2_OnUpdateEncodingList, ini.http_output,
+						php_mb2_OnUpdateEncodingList, ini.http_input,
 						zend_mbstring_ng_globals, mbstring_ng_globals)
 	STD_PHP_MB_INI_ENTRY("http_output", "pass", PHP_INI_ALL,
 						OnUpdateString, ini.http_output,
@@ -413,6 +413,8 @@ static PHP_GSHUTDOWN_FUNCTION(mbstring_ng)
 	if (mbstring_ng_globals->ini.locale) {
 		pefree(mbstring_ng_globals->ini.locale, 1);
 	}
+	php_mb2_ustring_dtor(&mbstring_ng_globals->ini.substitute_character);
+	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.http_input);
 	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.detect_order);
 }
 /* }}} */
