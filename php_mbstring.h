@@ -67,6 +67,7 @@ typedef struct {
 
 ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
     struct {
+        char *locale;
         php_mb2_char_ptr_list detect_order;
         php_mb2_char_ptr_list http_input;
         char *http_output;

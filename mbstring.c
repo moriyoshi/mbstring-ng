@@ -26,6 +26,7 @@
 #endif
 
 #include <unicode/ucnv.h>
+#include <unicode/uloc.h>
 #include <unicode/ucsdet.h>
 #include <unicode/ustring.h>
 
@@ -63,6 +64,7 @@ static PHP_MINFO_FUNCTION(mbstring_ng);
 
 static PHP_INI_MH(php_mb2_OnUpdateEncodingList);
 static PHP_INI_MH(php_mb2_OnUpdateUnicodeString);
+static PHP_INI_MH(php_mb2_OnUpdateLanguage);
 
 static PHP_MB_FUNCTION(strtoupper);
 static PHP_MB_FUNCTION(strtolower);
@@ -361,6 +363,9 @@ ZEND_GET_MODULE(mbstring_ng)
 
 /* {{{ php.ini directive registration */
 PHP_INI_BEGIN()
+	STD_PHP_MB_INI_ENTRY("language", "default", PHP_INI_ALL,
+						php_mb2_OnUpdateLanguage, ini.locale,
+						zend_mbstring_ng_globals, mbstring_ng_globals)
 	STD_PHP_MB_INI_ENTRY("detect_order", "ASCII", PHP_INI_ALL,
 						php_mb2_OnUpdateEncodingList, ini.detect_order,
 						zend_mbstring_ng_globals, mbstring_ng_globals)
@@ -395,6 +400,7 @@ static PHP_GINIT_FUNCTION(mbstring_ng)
 	php_mb2_char_ptr_list_ctor(&mbstring_ng_globals->ini.detect_order, 1);
 	php_mb2_char_ptr_list_ctor(&mbstring_ng_globals->ini.http_input, 1);
 	php_mb2_ustring_ctor(&mbstring_ng_globals->ini.substitute_character, 1);
+	mbstring_ng_globals->ini.locale = pestrdup("default", 1);
 
 	mbstring_ng_globals->ini.internal_encoding = NULL;
 	mbstring_ng_globals->ini.http_output = NULL;
@@ -404,6 +410,9 @@ static PHP_GINIT_FUNCTION(mbstring_ng)
 /* {{{ PHP_GSHUTDOWN_FUNCTION */
 static PHP_GSHUTDOWN_FUNCTION(mbstring_ng)
 {
+	if (mbstring_ng_globals->ini.locale) {
+		pefree(mbstring_ng_globals->ini.locale, 1);
+	}
 	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.detect_order);
 }
 /* }}} */
@@ -499,6 +508,35 @@ static PHP_INI_MH(php_mb2_OnUpdateUnicodeString)
 	}
 	php_mb2_ustring_dtor(p);
 	*p = new_value_ustr;
+
+	return SUCCESS;
+}
+/* }}} */
+
+
+/* {{{ static PHP_INI_MH(php_mb2_OnUpdateLanguage) */
+static PHP_INI_MH(php_mb2_OnUpdateLanguage)
+{
+	char buf[ULOC_FULLNAME_CAPACITY];
+#ifndef ZTS
+	char *base = (char *) mh_arg2;
+#else
+	char *base = (char *) ts_resource(*((int *) mh_arg2));
+#endif
+	char **p = (char **)(base + (size_t) mh_arg1);
+	UErrorCode err = U_ZERO_ERROR;
+	int32_t len;
+
+	len = uloc_canonicalize(new_value, buf, sizeof(buf) / sizeof(*buf), &err);
+	if (U_FAILURE(err)) {
+		return FAILURE;
+	}
+
+	if (*p) {
+		pefree(*p, 1);
+	}
+
+	*p = pestrndup(buf, len, 1);
 
 	return SUCCESS;
 }
