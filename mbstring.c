@@ -67,6 +67,7 @@ static PHP_INI_MH(php_mb2_OnUpdateUnicodeString);
 
 static PHP_MB_FUNCTION(strtoupper);
 static PHP_MB_FUNCTION(strtolower);
+static PHP_MB_FUNCTION(strtotitle);
 static PHP_MB_FUNCTION(internal_encoding);
 static PHP_MB_FUNCTION(preferred_mime_name);
 static PHP_MB_FUNCTION(parse_str);
@@ -107,6 +108,7 @@ static int php_mb2_ustring_ctor(php_mb2_ustring *str, int persistent);
 static int php_mb2_ustring_ctor_from_n(php_mb2_ustring *, const char *str, int32_t len, const char *encoding, int persistent);
 static int php_mb2_ustring_appendu(php_mb2_ustring *, const UChar *ustr, int32_t len);
 static int php_mb2_ustring_appendn(php_mb2_ustring *, const char *str, int32_t len, UConverter *from_conv);
+static int php_mb2_ustring_reserve(php_mb2_ustring *, int32_t len);
 static const UChar *php_mb2_ustring_offset(const php_mb2_ustring *, int32_t offset);
 static const UChar *php_mb2_ustring_roffset(const php_mb2_ustring *ustr, int32_t offset);
 static void php_mb2_ustring_dtor(php_mb2_ustring *str);
@@ -226,6 +228,11 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_strtolower, 0, 0, 1)
 	ZEND_ARG_INFO(0, encoding)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_strtotitle, 0, 0, 1)
+	ZEND_ARG_INFO(0, sourcestring)
+	ZEND_ARG_INFO(0, encoding)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_detect_encoding, 0, 0, 1)
 	ZEND_ARG_INFO(0, str)
 	ZEND_ARG_INFO(0, encoding_list)
@@ -308,6 +315,7 @@ ZEND_END_ARG_INFO()
 const zend_function_entry mbstring_ng_functions[] = {
 	PHP_MB_FE(strtoupper,			arginfo_mb_strtoupper)
 	PHP_MB_FE(strtolower,			arginfo_mb_strtolower)
+	PHP_MB_FE(strtotitle,			arginfo_mb_strtotitle)
 	PHP_MB_FE(internal_encoding,	arginfo_mb_internal_encoding)
 	PHP_MB_FE(preferred_mime_name,	arginfo_mb_preferred_mime_name)
 	PHP_MB_FE(parse_str,			arginfo_mb_parse_str)
@@ -903,37 +911,112 @@ PHP_MB_FUNCTION(convert_encoding)
 }
 /* }}} */
 
+static void _php_mb2_convert_case(int32_t(*case_conv_func)(UChar *, int32_t, const UChar *, int32_t, const char *, UErrorCode *), INTERNAL_FUNCTION_PARAMETERS)
+{
+	char *str;
+	int str_len;
+	char *encoding = NULL;
+	int encoding_len;
+	char *locale = NULL;
+	int locale_len;
+	int32_t result_len;
+	php_mb2_ustring ustr, result;
+	UErrorCode err;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|s!s!", &str, &str_len,
+				&encoding, &encoding_len) == FAILURE) {
+		return;
+	}
+
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+	if (!locale) {
+		locale = MBSTR_NG(ini).locale;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&ustr, str, str_len, encoding ? encoding: MBSTR_NG(ini).internal_encoding, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert the input to Unicode");
+		RETURN_FALSE;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor(&result, 0)) {
+		php_mb2_ustring_dtor(&ustr);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
+		RETURN_FALSE;
+	}
+
+	if (FAILURE == php_mb2_ustring_reserve(&result, ustr.len)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
+		RETVAL_FALSE;
+		goto out;
+	}
+	result.len = ustr.len;
+
+	for (;;) {
+		err = U_ZERO_ERROR;
+		result_len = case_conv_func(result.p, result.len, ustr.p, ustr.len, locale, &err);
+		if (U_SUCCESS(err)) {
+			result.len = result_len;
+			break;
+		}
+		if (err != U_BUFFER_OVERFLOW_ERROR) {
+			RETVAL_FALSE;
+			goto out;
+		}
+
+		if (FAILURE == php_mb2_ustring_reserve(&result, result.len + 16)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
+			RETVAL_FALSE;
+			goto out;
+		}
+		result.len = result.len + 16;
+	}
+
+	{
+		char *output;
+		size_t output_len;
+		if (FAILURE == php_mb2_encode(result.p, result.len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
+			RETVAL_FALSE;
+		} else {
+			RETVAL_STRINGL(output, output_len, 0);
+		}
+	}
+
+out:
+	php_mb2_ustring_dtor(&result);
+	php_mb2_ustring_dtor(&ustr);
+}
+
 /* {{{ proto string mb_strtoupper(string sourcestring [, string encoding])
  *  Returns a uppercased version of sourcestring
  */
 PHP_MB_FUNCTION(strtoupper)
 {
-	char *str;
-	int str_len;
-	char **from_encoding;
-	int from_encoding_len;
-
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|s!", &str, &str_len,
-				&from_encoding, &from_encoding_len) == FAILURE) {
-		return;
-	}
+	_php_mb2_convert_case(&u_strToUpper, INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 /* }}} */
 
-/* {{{ proto string mb_strtolower(string sourcestring [, string encoding])
+/* {{{ proto string mb_strtolower(string sourcestring [, string encoding, string locale])
  *  Returns a lowercased version of sourcestring
  */
-PHP_MB_FUNCTION(trtolower)
+PHP_MB_FUNCTION(strtolower)
 {
-	char *str;
-	int str_len;
-	char *from_encoding = NULL;
-	int from_encoding_len;
+	_php_mb2_convert_case(&u_strToLower, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+/* }}} */
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|s!", &str, &str_len,
-				&from_encoding, &from_encoding_len) == FAILURE) {
-		return;
-	}
+static int32_t _php_mb2_strToTitle_wrapper(UChar *dest, int32_t dest_cap, const UChar *src, int32_t src_len, const char *loc, UErrorCode *err)
+{
+	return u_strToTitle(dest, dest_cap, src, src_len, NULL, loc, err);
+}
+
+/* {{{ proto string mb_strtotitle(string sourcestring [, string encoding, string locale])
+ *  Returns a titlecased version of sourcestring
+ */
+PHP_MB_FUNCTION(strtotitle)
+{
+	_php_mb2_convert_case(&_php_mb2_strToTitle_wrapper, INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 /* }}} */
 
@@ -1126,10 +1209,9 @@ static void php_mb2_ustring_dtor(php_mb2_ustring *str)
 	}
 }
 
-static int php_mb2_ustring_appendu(php_mb2_ustring *str, const UChar *ustr, int32_t len)
+static int php_mb2_ustring_reserve(php_mb2_ustring *str, int32_t new_len)
 {
-	int32_t new_len = str->len + len;
-	if (new_len < str->len) {
+	if (new_len < 0) {
 		return FAILURE;
 	}
 
@@ -1150,6 +1232,20 @@ static int php_mb2_ustring_appendu(php_mb2_ustring *str, const UChar *ustr, int3
 
 		str->p = new_p;
 		str->nalloc = new_nalloc;
+	}
+
+	return SUCCESS;
+}
+
+static int php_mb2_ustring_appendu(php_mb2_ustring *str, const UChar *ustr, int32_t len)
+{
+	int32_t new_len = str->len + len;
+	if (new_len < str->len) {
+		return FAILURE;
+	}
+
+	if (FAILURE == php_mb2_ustring_reserve(str, new_len)) {
+		return FAILURE;
 	}
 
 	memmove(str->p + str->len, ustr, sizeof(UChar) * len);
