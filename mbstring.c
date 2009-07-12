@@ -100,11 +100,14 @@ static int php_mb2_char_ptr_list_reserve(php_mb2_char_ptr_list *list, size_t nit
 static int php_mb2_parse_encoding_list(const char *value, size_t value_length, php_mb2_char_ptr_list *pretval, int persistent);
 static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pretval TSRMLS_DC);
 static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC);
+static int php_mb2_encode(const UChar *input, size_t length, const char *to_encoding, char **output, size_t *output_len, int persistent TSRMLS_DC);
 static char *php_mb2_detect_encoding(const char *input, size_t length, const char * const *from_encodings, size_t num_from_encodings TSRMLS_DC);
 static int php_mb2_ustring_ctor(php_mb2_ustring *str, int persistent);
 static int php_mb2_ustring_ctor_from_n(php_mb2_ustring *, const char *str, int32_t len, const char *encoding, int persistent);
 static int php_mb2_ustring_appendu(php_mb2_ustring *, const UChar *ustr, int32_t len);
 static int php_mb2_ustring_appendn(php_mb2_ustring *, const char *str, int32_t len, UConverter *from_conv);
+static const UChar *php_mb2_ustring_offset(const php_mb2_ustring *, int32_t offset);
+static const UChar *php_mb2_ustring_roffset(const php_mb2_ustring *ustr, int32_t offset);
 static void php_mb2_ustring_dtor(php_mb2_ustring *str);
 
 /* {{{ arginfo */
@@ -764,13 +767,48 @@ PHP_MB_FUNCTION(substr)
 {
 	char *str;
 	int str_len;
-	char *encoding;
+	char *encoding = NULL;
 	int encoding_len;
 	long from, len;
+	php_mb2_ustring ustr;
+	const UChar *start, *end;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|ls", &str, &str_len, &from, &len, &encoding, &encoding_len) == FAILURE) {
 		return;
 	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&ustr, str, str_len, encoding ? encoding: MBSTR_NG(ini).internal_encoding, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert the input to Unicode");
+		RETURN_FALSE;
+	}
+
+	if (from >= 0) {
+		start = php_mb2_ustring_offset(&ustr, from);
+		if (start == NULL) {
+			start = ustr.p + ustr.len;
+		}
+	} else {
+		start = php_mb2_ustring_roffset(&ustr, -from - 1);
+		if (start == NULL) {
+			start = ustr.p;
+		}
+	}
+
+	if (start + len > ustr.p + ustr.len) {
+		len = (ustr.p + ustr.len) - start;
+	}
+
+	{
+		char *output;
+		size_t output_len;
+		if (FAILURE == php_mb2_encode(start, len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
+			RETVAL_FALSE;
+		} else {
+			RETVAL_STRINGL(output, output_len, 0);
+		}
+	}
+
+	php_mb2_ustring_dtor(&ustr);
 }
 /* }}} */
 
@@ -1167,6 +1205,44 @@ static int php_mb2_ustring_appendn(php_mb2_ustring *str, const char *src, int32_
 	return SUCCESS;
 }
 
+static const UChar *php_mb2_ustring_offset(const php_mb2_ustring *ustr, int32_t offset)
+{
+	const UChar *p = ustr->p, *e = ustr->p + ustr->len;
+	while (offset > 0) {
+		if (p >= e) {
+			return NULL;
+		}
+		if (U16_IS_LEAD(*p)) {
+			++p;
+			assert(p < e && U16_IS_TRAIL(*p));
+			++p;
+		} else {
+			++p;
+		}
+		--offset;
+	}
+	return p;
+}
+
+static const UChar *php_mb2_ustring_roffset(const php_mb2_ustring *ustr, int32_t offset)
+{
+	const UChar *p = ustr->p + ustr->len, *e = ustr->p;
+	while (offset > 0) {
+		if (p <= e) {
+			return NULL;
+		}
+		--p;
+		if (U16_IS_TRAIL(*p)) {
+			assert(p > e);
+			--p;
+		  	assert(U16_IS_LEAD(*--p));
+		}
+		--offset;
+	}
+	return p;
+}
+
+
 typedef struct php_mb2_uconverter_callback_ctx {
 	char *dbuf;
 	char *pdl;
@@ -1418,6 +1494,115 @@ fail:
 	}
 	return FAILURE;
 }
+
+static int php_mb2_encode(const UChar *input, size_t length, const char *to_encoding, char **output, size_t *output_len, int persistent TSRMLS_DC)
+{
+	UErrorCode err = U_ZERO_ERROR;
+	UConverter *to_conv = NULL;
+	char *pd;
+	const UChar *ps, *psl;
+	int use_heap = 0;
+
+	php_mb2_uconverter_callback_ctx ctx;
+	ctx.dbuf = NULL;
+	ctx.persistent = persistent;
+	ctx.subst_char_u = MBSTR_NG(ini).substitute_character.p;
+	ctx.subst_char_u_len = MBSTR_NG(ini).substitute_character.len;
+#ifdef ZTS
+	TSRMLS_C = TSRMLS_C;
+#endif
+	MBSTR_NG(runtime).in_ucnv_error_handler = FALSE;
+
+	to_conv = ucnv_open(to_encoding, &err);
+	if (!to_conv) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to create the encoder for %s (error: %s)", to_encoding, u_errorName(err));
+		goto fail;
+	}
+
+	ucnv_setFromUCallBack(to_conv, (UConverterFromUCallback)php_mb2_uconverter_from_unicode_callback, &ctx, NULL, NULL, &err);
+	if (U_FAILURE(err)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to set the callback for the encoder (error: %s)", u_errorName(err));
+		goto fail;
+	}
+
+	ctx.dbuf = pemalloc(length + 1, persistent);
+	if (!ctx.dbuf)
+		goto fail;
+
+	psl = input + length;
+	ctx.pdl = ctx.dbuf + length;
+	if (ctx.pdl < ctx.dbuf) {
+		goto fail;
+	}
+
+	ps = input;
+	pd = ctx.dbuf;
+
+	for (;;) {
+		size_t new_dbuf_size;
+		char *new_dbuf;
+
+		err = U_ZERO_ERROR;
+		ucnv_fromUnicode(to_conv, &pd, ctx.pdl, &ps, psl, NULL, FALSE, &err);
+		if (U_SUCCESS(err) || err != U_BUFFER_OVERFLOW_ERROR) {
+			break;
+		}
+
+		new_dbuf_size = (ctx.pdl - ctx.dbuf) << 1;
+		if (new_dbuf_size + 1 < ctx.pdl - ctx.dbuf || !(new_dbuf = perealloc(ctx.dbuf, new_dbuf_size + 1, persistent))) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion results");
+			goto fail;
+		}
+		pd = new_dbuf + (pd - ctx.dbuf);
+		ctx.dbuf = new_dbuf;
+		ctx.pdl = new_dbuf + new_dbuf_size;
+	}
+	if (U_SUCCESS(err)) {
+		for (;;) {
+			size_t new_dbuf_size;
+			char *new_dbuf;
+
+			err = U_ZERO_ERROR;
+			ucnv_fromUnicode(to_conv, &pd, ctx.pdl, &ps, psl, NULL, TRUE, &err);
+			if (U_SUCCESS(err) || err != U_BUFFER_OVERFLOW_ERROR) {
+				break;
+			}
+
+			new_dbuf_size = (ctx.pdl - ctx.dbuf) << 1;
+			if (new_dbuf_size + 1 < ctx.pdl - ctx.dbuf || !(new_dbuf = perealloc(ctx.dbuf, new_dbuf_size + 1, persistent))) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion results");
+				goto fail;
+			}
+			pd = new_dbuf + (pd - ctx.dbuf);
+			ctx.dbuf = new_dbuf;
+			ctx.pdl = new_dbuf + new_dbuf_size;
+		}
+	} else {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to encode the Unicode string to %s (error: %s)", to_encoding, u_errorName(err));
+		goto fail;
+	}
+
+	*pd = '\0';
+
+	*output = ctx.dbuf;
+	*output_len = pd - ctx.dbuf; 
+
+	if (to_conv) {
+		ucnv_close(to_conv);
+	}
+
+	return SUCCESS;
+
+fail:
+	if (ctx.dbuf) {
+		pefree(ctx.dbuf, persistent);
+	}
+	if (to_conv) {
+		ucnv_close(to_conv);
+	}
+	return FAILURE;
+}
+
 
 static int php_mb2_int32_data_compare(const HashPosition *a, const HashPosition *b TSRMLS_DC)
 {
