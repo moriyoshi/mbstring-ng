@@ -500,8 +500,6 @@ static PHP_INI_MH(php_mb2_OnUpdateUnicodeString)
 #endif
 	php_mb2_ustring *p = (php_mb2_ustring *)(base + (size_t) mh_arg1);
 	php_mb2_ustring new_value_ustr;
-	UErrorCode err;
-	UConverter *conv;
 
 	if (FAILURE == php_mb2_ustring_ctor_from_n(&new_value_ustr, new_value, new_value_length, MBSTR_NG(ini).internal_encoding ? MBSTR_NG(ini).internal_encoding: "ASCII", 1)) {
 		return FAILURE;
@@ -512,7 +510,6 @@ static PHP_INI_MH(php_mb2_OnUpdateUnicodeString)
 	return SUCCESS;
 }
 /* }}} */
-
 
 /* {{{ static PHP_INI_MH(php_mb2_OnUpdateLanguage) */
 static PHP_INI_MH(php_mb2_OnUpdateLanguage)
