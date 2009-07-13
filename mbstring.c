@@ -798,6 +798,10 @@ PHP_MB_FUNCTION(substr)
 		RETURN_FALSE;
 	}
 
+	if (ZEND_NUM_ARGS() <= 2) {
+		len = ustr.len;
+	}
+
 	if (from >= 0) {
 		start = php_mb2_ustring_offset(&ustr, from);
 		if (start == NULL) {
