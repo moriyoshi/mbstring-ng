@@ -991,7 +991,7 @@ out:
 	php_mb2_ustring_dtor(&ustr);
 }
 
-/* {{{ proto string mb_strtoupper(string sourcestring [, string encoding])
+/* {{{ proto string mb_strtoupper(string sourcestring [, string encoding [, string locale]])
  *  Returns a uppercased version of sourcestring
  */
 PHP_MB_FUNCTION(strtoupper)
@@ -1000,7 +1000,7 @@ PHP_MB_FUNCTION(strtoupper)
 }
 /* }}} */
 
-/* {{{ proto string mb_strtolower(string sourcestring [, string encoding, string locale])
+/* {{{ proto string mb_strtolower(string sourcestring [, string encoding [, string locale]])
  *  Returns a lowercased version of sourcestring
  */
 PHP_MB_FUNCTION(strtolower)
@@ -1014,7 +1014,7 @@ static int32_t _php_mb2_strToTitle_wrapper(UChar *dest, int32_t dest_cap, const 
 	return u_strToTitle(dest, dest_cap, src, src_len, NULL, loc, err);
 }
 
-/* {{{ proto string mb_strtotitle(string sourcestring [, string encoding, string locale])
+/* {{{ proto string mb_strtotitle(string sourcestring [, string encoding [, string locale]])
  *  Returns a titlecased version of sourcestring
  */
 PHP_MB_FUNCTION(strtotitle)
