@@ -1123,7 +1123,7 @@ static void _php_mb2_convert_case(int32_t(*case_conv_func)(UChar *, int32_t, con
 		locale = MBSTR_NG(ini).locale;
 	}
 
-	if (FAILURE == php_mb2_ustring_ctor_from_n(&ustr, str, str_len, encoding ? encoding: MBSTR_NG(ini).internal_encoding, 0)) {
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&ustr, str, str_len, encoding, 0)) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert the input to Unicode");
 		RETURN_FALSE;
 	}
