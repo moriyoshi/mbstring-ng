@@ -25,6 +25,7 @@
 #include "config.h"
 #endif
 
+#include <unicode/uchar.h>
 #include <unicode/ucnv.h>
 #include <unicode/uloc.h>
 #include <unicode/ucsdet.h>
@@ -987,18 +988,61 @@ PHP_MB_FUNCTION(strcut)
 }
 /* }}} */
 
-/* {{{ proto int mb_strwidth(string str [, string encoding])
+/* {{{ proto int mb_strwidth(string str [, string encoding, [ bool ambiguous_as_half]])
    Gets terminal width of a string */
 PHP_MB_FUNCTION(strwidth)
 {
-	char *string_val;
-	int string_len;
-	char *enc_name = NULL;
-	int enc_name_len;
+	char *str;
+	int str_len;
+	char *encoding = NULL;
+	int encoding_len;
+	zend_bool ambiguous_as_half = FALSE;
+	php_mb2_ustring ustr;
+	const UChar *p, *e;
+	long retval;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|s", &string_val, &string_len, &enc_name, &enc_name_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|sb", &str, &str_len, &encoding, &encoding_len, &ambiguous_as_half) == FAILURE) {
 		return;
 	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&ustr, str, str_len, encoding ? encoding: MBSTR_NG(ini).internal_encoding, 0)) {
+		RETURN_FALSE;
+	}
+
+	retval = 0;
+	for (p = ustr.p, e = ustr.p + ustr.len; p < e; ) {
+		UChar32 c;
+		UEastAsianWidth ea;
+
+		if (U16_IS_SURROGATE(*p)) {
+			assert(U16_IS_LEAD(*p) && p + 1 < e && U16_IS_TRAIL(*(p + 1)));
+			c = U16_GET_SUPPLEMENTARY(*p, *(p + 1));
+			p += 2;
+		} else {
+			c = *p;
+			p++;
+		}
+		switch (u_getIntPropertyValue(c, UCHAR_EAST_ASIAN_WIDTH)) {
+		case U_EA_NEUTRAL:
+		case U_EA_HALFWIDTH:
+		case U_EA_NARROW:
+			retval += 1;
+			break;
+		case U_EA_FULLWIDTH:
+		case U_EA_WIDE:
+			retval += 2;
+			break;
+		case U_EA_AMBIGUOUS:
+			retval += ambiguous_as_half ? 1: 2;
+			break;
+		default:
+			assert(FALSE);
+			break;
+		}
+	}
+
+	RETVAL_LONG(retval);
+	php_mb2_ustring_dtor(&ustr);
 }
 /* }}} */
 
