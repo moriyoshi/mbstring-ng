@@ -831,19 +831,155 @@ PHP_MB_FUNCTION(substr)
 }
 /* }}} */
 
-/* {{{ proto string mb_strcut(string str, int start [, int length [, string encoding]])
+static int _php_mb2_bytewise_cut(php_mb2_ustring *result, const char *str, int str_len, int from, int len, const char *encoding TSRMLS_DC)
+{
+	const UChar *start;
+	UConverter *conv;
+	UErrorCode err;
+
+	if (FAILURE == php_mb2_ustring_ctor(result, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
+		return FAILURE;
+	}
+
+	if (FAILURE == php_mb2_ustring_reserve(result, str_len)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
+		php_mb2_ustring_dtor(result);
+		return FAILURE;
+	}
+
+
+	err = U_ZERO_ERROR;
+	conv = ucnv_open(encoding, &err);
+	if (U_FAILURE(err)) {
+		php_mb2_ustring_dtor(result);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
+		return FAILURE;
+	}
+
+	{
+		UChar32 c;
+		const char *p = str, *e = str + str_len, *po = str + from, *pl;
+
+		assert(po <= e);
+
+		for (;;) {
+			const char *prev_p;
+			if (p >= po) {
+				pl = p + len;
+				break;
+			}
+
+			prev_p = p;
+			err = U_ZERO_ERROR;
+			c = ucnv_getNextUChar(conv, &p, e, &err);
+			if (U_FAILURE(err)) {
+				php_mb2_ustring_dtor(result);
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", encoding, u_errorName(err));
+				return FAILURE;
+			}
+			if (p > po) {
+				UChar buf[U16_MAX_LENGTH];
+				int32_t i = 0;
+				pl = prev_p + len;
+				if (p <= pl) {
+					U16_APPEND_UNSAFE(buf, i, c);
+					assert(result->nalloc >= i);
+					memmove(result->p, buf, sizeof(UChar) * i);
+					result->len = i;
+				}
+				break;
+			}
+		}
+
+		if (pl > e) {
+			pl = e;
+		}
+
+		while (p < pl) {
+			UChar buf[U16_MAX_LENGTH];
+			int32_t i = 0;
+
+			err = U_ZERO_ERROR;
+			c = ucnv_getNextUChar(conv, &p, e, &err);
+			if (U_FAILURE(err)) {
+				php_mb2_ustring_dtor(result);
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", encoding, u_errorName(err));
+				return FAILURE;
+			}
+			if (p > pl) {
+				break;
+			}
+			U16_APPEND_UNSAFE(buf, i, c);
+			if (FAILURE == php_mb2_ustring_reserve(result, result->len + i)) {
+				php_mb2_ustring_dtor(result);
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
+				return FAILURE;
+			}
+			memmove(result->p + result->len, buf, sizeof(UChar) * i);
+			result->len += i;
+		}
+	}
+
+	return SUCCESS;
+}
+
+/* {{{ proto string mb_strcut(string str, int start [, int length [, string encoding [, int mode]]])
    Returns part of a string */
 PHP_MB_FUNCTION(strcut)
 {
-	long from, len;
-	char *string_val;
-	int string_len;
-	char *encoding;
+	char *str;
+	int str_len;
+	char *encoding = NULL;
 	int encoding_len;
+	long from, len;
+	php_mb2_ustring ustr;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|ls", &string_val, &string_len, &from, &len, &encoding, &encoding_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|ls", &str, &str_len, &from, &len, &encoding, &encoding_len) == FAILURE) {
 		return;
 	}
+
+	if (ZEND_NUM_ARGS() > 2) {
+		if (len < 0) {
+			len = str_len + len;
+			if (len < 0) {
+				len = 0;
+			}
+		}
+	} else {
+		len = str_len;
+	}
+
+	if (from < 0) {
+		from = str_len + from;
+		if (from < 0) {
+			from = 0;
+		}
+	} else {
+		if (from > str_len) {
+			from = str_len;
+		}
+	}
+
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+
+	if (FAILURE == _php_mb2_bytewise_cut(&ustr, str, str_len, from, len, encoding TSRMLS_CC)) {
+		RETURN_FALSE;
+	}
+
+	{
+		char *output;
+		size_t output_len;
+		if (FAILURE == php_mb2_encode(ustr.p, ustr.len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
+			RETVAL_FALSE;
+		} else {
+			RETVAL_STRINGL(output, output_len, 0);
+		}
+	}
+
+	php_mb2_ustring_dtor(&ustr);
 }
 /* }}} */
 
@@ -934,6 +1070,7 @@ static void _php_mb2_convert_case(int32_t(*case_conv_func)(UChar *, int32_t, con
 	if (!encoding) {
 		encoding = MBSTR_NG(ini).internal_encoding;
 	}
+
 	if (!locale) {
 		locale = MBSTR_NG(ini).locale;
 	}
