@@ -998,9 +998,10 @@ PHP_MB_FUNCTION(strwidth)
 	char *encoding = NULL;
 	int encoding_len;
 	zend_bool ambiguous_as_half = FALSE;
-	php_mb2_ustring ustr;
-	const UChar *p, *e;
 	long retval;
+	const char *p, *e;
+	UErrorCode err;
+	UConverter *conv = NULL;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|sb", &str, &str_len, &encoding, &encoding_len, &ambiguous_as_half) == FAILURE) {
 		return;
@@ -1011,28 +1012,39 @@ PHP_MB_FUNCTION(strwidth)
 		ambiguous_as_half = 1;
 	}
 
-	if (FAILURE == php_mb2_ustring_ctor_from_n(&ustr, str, str_len, encoding ? encoding: MBSTR_NG(ini).internal_encoding, 0)) {
-		RETURN_FALSE;
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+
+	RETVAL_FALSE;
+
+	err = U_ZERO_ERROR;
+	conv = ucnv_open(encoding, &err);
+
+	if (U_FAILURE(err)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
+		return;
 	}
 
 	retval = 0;
-	for (p = ustr.p, e = ustr.p + ustr.len; p < e; ) {
-		UChar32 c;
+	for (p = str, e = str + str_len; p < e; ) {
 		UEastAsianWidth ea;
 
-		if (U16_IS_LEAD(*p)) {
-			assert(U16_IS_LEAD(*p) && p + 1 < e && U16_IS_TRAIL(*(p + 1)));
-			c = U16_GET_SUPPLEMENTARY(*p, *(p + 1));
-			p += 2;
-		} else {
-			c = *p;
-			p++;
+		err = U_ZERO_ERROR;
+		UChar32 c = ucnv_getNextUChar(conv, &p, e, &err);
+
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", encoding, u_errorName(err));
+			ucnv_close(conv);
+			return;
 		}
+
 		retval += _php_mb2_get_uchar_eaw(c, ambiguous_as_half);
 	}
 
+	ucnv_close(conv);
+
 	RETVAL_LONG(retval);
-	php_mb2_ustring_dtor(&ustr);
 }
 /* }}} */
 
