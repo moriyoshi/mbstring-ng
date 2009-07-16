@@ -54,9 +54,6 @@
 #define STD_PHP_MB_INI_BOOLEAN(name, default_value, flags, handler, field, type, global) \
 	STD_PHP_INI_BOOLEAN("mbstring2." name, default_value, flags, handler, field, type, global)
 
-#define PHP_MB2_AMBIGUOUS_AS_HALF 1
-#define PHP_MB2_EAST_ASIAN_WIDTH 2
-
 ZEND_DECLARE_MODULE_GLOBALS(mbstring_ng);
 static PHP_GINIT_FUNCTION(mbstring_ng);
 static PHP_GSHUTDOWN_FUNCTION(mbstring_ng);
@@ -116,6 +113,7 @@ static int php_mb2_ustring_reserve(php_mb2_ustring *, int32_t len);
 static const UChar *php_mb2_ustring_offset(const php_mb2_ustring *, int32_t offset);
 static const UChar *php_mb2_ustring_roffset(const php_mb2_ustring *ustr, int32_t offset);
 static void php_mb2_ustring_dtor(php_mb2_ustring *str);
+static int php_mb2_get_eaw(const UChar *str, int32_t len, zend_bool ambiguous_as_half, int *retval);
 
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_internal_encoding, 0, 0, 0)
@@ -435,9 +433,6 @@ static PHP_MINIT_FUNCTION(mbstring_ng)
 {
 	REGISTER_INI_ENTRIES();
 
-	REGISTER_LONG_CONSTANT("MB2_AMBIGUOUS_AS_HALF", PHP_MB2_AMBIGUOUS_AS_HALF, CONST_CS | CONST_PERSISTENT);
-	REGISTER_LONG_CONSTANT("MB2_EAST_ASIAN_WIDTH", PHP_MB2_EAST_ASIAN_WIDTH, CONST_CS | CONST_PERSISTENT);
-
 	return SUCCESS;
 }
 /* }}} */
@@ -534,7 +529,7 @@ static int _php_mb2_code_to_eaw_table[2][U_EA_COUNT] = {
 	{ 1, 1, 1, 2, 1, 2 }
 };	
 
-#define _php_mb2_get_eaw(c, ambiguous_as_half) \
+#define _php_mb2_get_uchar_eaw(c, ambiguous_as_half) \
 	_php_mb2_code_to_eaw_table[ambiguous_as_half][u_getIntPropertyValue((c), UCHAR_EAST_ASIAN_WIDTH)]
 /* }}} */
 
@@ -853,20 +848,68 @@ PHP_MB_FUNCTION(substr)
 }
 /* }}} */
 
-static int _php_mb2_bytewise_cut(php_mb2_ustring *result, const char *str, int str_len, int from, int len, UConverter *conv TSRMLS_DC)
+/* {{{ proto string mb_strcut(string str, int start [, int length [, string encoding]])
+   Returns part of a string */
+PHP_MB_FUNCTION(strcut)
 {
+	char *str;
+	int str_len;
+	char *encoding = NULL;
+	int encoding_len;
+	long from, len;
+	php_mb2_ustring result;
+	UConverter *conv;
 	const UChar *start;
 	UErrorCode err;
 
-	if (FAILURE == php_mb2_ustring_ctor(result, 0)) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
-		return FAILURE;
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|ls", &str, &str_len, &from, &len, &encoding, &encoding_len) == FAILURE) {
+		return;
 	}
 
-	if (FAILURE == php_mb2_ustring_reserve(result, str_len)) {
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+
+	RETVAL_FALSE;
+
+	err = U_ZERO_ERROR;
+	conv = ucnv_open(encoding, &err);
+	if (U_FAILURE(err)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
+		return;
+	}
+
+	if (ZEND_NUM_ARGS() > 2) {
+		if (len < 0) {
+			len = str_len + len;
+			if (len < 0) {
+				len = 0;
+			}
+		}
+	} else {
+		len = str_len;
+	}
+
+	if (from < 0) {
+		from = str_len + from;
+		if (from < 0) {
+			from = 0;
+		}
+	} else {
+		if (from > str_len) {
+			from = str_len;
+		}
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor(&result, 0)) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
-		php_mb2_ustring_dtor(result);
-		return FAILURE;
+		ucnv_close(conv);
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_reserve(&result, str_len)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
+		goto out;
 	}
 
 	{
@@ -887,9 +930,8 @@ static int _php_mb2_bytewise_cut(php_mb2_ustring *result, const char *str, int s
 			c = ucnv_getNextUChar(conv, &p, e, &err);
 			if (U_FAILURE(err)) {
 				UErrorCode dummy = U_ZERO_ERROR;
-				php_mb2_ustring_dtor(result);
 				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", ucnv_getName(conv, &dummy), u_errorName(err));
-				return FAILURE;
+				goto out;
 			}
 			if (p > po) {
 				UChar buf[U16_MAX_LENGTH];
@@ -897,9 +939,9 @@ static int _php_mb2_bytewise_cut(php_mb2_ustring *result, const char *str, int s
 				pl = prev_p + len;
 				if (p <= pl) {
 					U16_APPEND_UNSAFE(buf, i, c);
-					assert(result->nalloc >= i);
-					memmove(result->p, buf, sizeof(UChar) * i);
-					result->len = i;
+					assert(result.nalloc >= i);
+					memmove(result.p, buf, sizeof(UChar) * i);
+					result.len = i;
 				}
 				break;
 			}
@@ -917,231 +959,33 @@ static int _php_mb2_bytewise_cut(php_mb2_ustring *result, const char *str, int s
 			c = ucnv_getNextUChar(conv, &p, e, &err);
 			if (U_FAILURE(err)) {
 				UErrorCode dummy = U_ZERO_ERROR;
-				php_mb2_ustring_dtor(result);
 				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", ucnv_getName(conv, &dummy), u_errorName(err));
-				return FAILURE;
+				goto out;
 			}
 			if (p > pl) {
 				break;
 			}
 			U16_APPEND_UNSAFE(buf, i, c);
-			if (FAILURE == php_mb2_ustring_reserve(result, result->len + i)) {
-				php_mb2_ustring_dtor(result);
+			if (FAILURE == php_mb2_ustring_reserve(&result, result.len + i)) {
 				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
-				return FAILURE;
+				goto out;
 			}
-			memmove(result->p + result->len, buf, sizeof(UChar) * i);
-			result->len += i;
+			memmove(result.p + result.len, buf, sizeof(UChar) * i);
+			result.len += i;
 		}
 	}
-
-	return SUCCESS;
-}
-
-static int _php_mb2_eaw_cut(php_mb2_ustring *result, const char *str, int str_len, int from, int len, UConverter *conv, zend_bool ambiguous_as_half TSRMLS_DC)
-{
-	const UChar *start;
-	UErrorCode err;
-
-	if (ambiguous_as_half) {
-		/* make sure that the integer value is 1 */
-		ambiguous_as_half = 1;
-	}
-
-	if (FAILURE == php_mb2_ustring_ctor(result, 0)) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
-		return FAILURE;
-	}
-
-	if (FAILURE == php_mb2_ustring_reserve(result, str_len)) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
-		php_mb2_ustring_dtor(result);
-		return FAILURE;
-	}
-
-	{
-		UChar32 c;
-		int windex = 0, end;
-		const char *p = str, *e = str + str_len;
-
-		while (p < e) {
-			int w;
-			if (windex >= from) {
-				break;
-			}
-
-			err = U_ZERO_ERROR;
-			c = ucnv_getNextUChar(conv, &p, e, &err);
-			if (U_FAILURE(err)) {
-				UErrorCode dummy = U_ZERO_ERROR;
-				php_mb2_ustring_dtor(result);
-				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", ucnv_getName(conv, &dummy), u_errorName(err));
-				return FAILURE;
-			}
-			w = _php_mb2_get_eaw(c, ambiguous_as_half);
-			if (windex + w > from) {
-				UChar buf[U16_MAX_LENGTH];
-				int32_t i = 0;
-				if (w <= len) {
-					U16_APPEND_UNSAFE(buf, i, c);
-					assert(result->nalloc >= i);
-					memmove(result->p, buf, sizeof(UChar) * i);
-					result->len = i;
-				}
-				break;
-			}
-			windex += w;
-		}
-
-		end = windex + len;
-
-		while (p < e) {
-			UChar buf[U16_MAX_LENGTH];
-			int32_t i = 0;
-
-			err = U_ZERO_ERROR;
-			c = ucnv_getNextUChar(conv, &p, e, &err);
-			if (U_FAILURE(err)) {
-				UErrorCode dummy = U_ZERO_ERROR;
-				php_mb2_ustring_dtor(result);
-				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", ucnv_getName(conv, &dummy), u_errorName(err));
-				return FAILURE;
-			}
-			windex += _php_mb2_get_eaw(c, ambiguous_as_half);
-			if (windex > end) {
-				break;
-			}
-			U16_APPEND_UNSAFE(buf, i, c);
-			if (FAILURE == php_mb2_ustring_reserve(result, result->len + i)) {
-				php_mb2_ustring_dtor(result);
-				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the result buffer");
-				return FAILURE;
-			}
-			memmove(result->p + result->len, buf, sizeof(UChar) * i);
-			result->len += i;
-		}
-	}
-
-	return SUCCESS;
-}
-
-/* {{{ proto string mb_strcut(string str, int start [, int length [, string encoding [, int mode]]])
-   Returns part of a string */
-PHP_MB_FUNCTION(strcut)
-{
-	char *str;
-	int str_len;
-	char *encoding = NULL;
-	int encoding_len;
-	long from, len, mode = 0;
-	php_mb2_ustring ustr;
-	UConverter *conv;
-
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|ls!l", &str, &str_len, &from, &len, &encoding, &encoding_len, &mode) == FAILURE) {
-		return;
-	}
-
-	if (!encoding) {
-		encoding = MBSTR_NG(ini).internal_encoding;
-	}
-
-	{
-		UErrorCode err = U_ZERO_ERROR;
-		conv = ucnv_open(encoding, &err);
-		if (U_FAILURE(err)) {
-			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
-			RETURN_FALSE;
-		}
-	}
-
-	if ((mode & PHP_MB2_EAST_ASIAN_WIDTH)) {
-		int width = 0;
-		int ambiguous_as_half = (mode & PHP_MB2_AMBIGUOUS_AS_HALF) ? 1: 0;
-		UErrorCode err;
-		const char *p, *e;
-
-		for (p = str, e = str + str_len; p < e; ) {
-			UChar32 c;
-			err = U_ZERO_ERROR;
-			c = ucnv_getNextUChar(conv, &p, e, &err);
-			if (U_FAILURE(err)) {
-				uconv_close(conv);
-				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the input string as %s (error: %s)", encoding, u_errorName(err));
-				RETURN_FALSE;
-			}
-			width += _php_mb2_get_eaw(c, ambiguous_as_half);
-		}
-
-		ucnv_reset(conv);
-
-		if (ZEND_NUM_ARGS() > 2) {
-			if (len < 0) {
-				len = width + len;
-				if (len < 0) {
-					len = 0;
-				}
-			}
-		} else {
-			len = width;
-		}
-
-		if (from < 0) {
-			from = width + from;
-			if (from < 0) {
-				from = 0;
-			}
-		} else {
-			if (from > width) {
-				from = width;
-			}
-		}
-
-		if (FAILURE == _php_mb2_eaw_cut(&ustr, str, str_len, from, len, conv, ambiguous_as_half TSRMLS_CC)) {
-			ucnv_close(conv);
-			RETURN_FALSE;
-		}
-	} else {
-		if (ZEND_NUM_ARGS() > 2) {
-			if (len < 0) {
-				len = str_len + len;
-				if (len < 0) {
-					len = 0;
-				}
-			}
-		} else {
-			len = str_len;
-		}
-
-		if (from < 0) {
-			from = str_len + from;
-			if (from < 0) {
-				from = 0;
-			}
-		} else {
-			if (from > str_len) {
-				from = str_len;
-			}
-		}
-
-		if (FAILURE == _php_mb2_bytewise_cut(&ustr, str, str_len, from, len, conv TSRMLS_CC)) {
-			ucnv_close(conv);
-			RETURN_FALSE;
-		}
-	}
-
-	ucnv_close(conv);
 
 	{
 		char *output;
 		size_t output_len;
-		if (FAILURE == php_mb2_encode(ustr.p, ustr.len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
-			RETVAL_FALSE;
-		} else {
+		if (SUCCESS == php_mb2_encode(result.p, result.len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
 			RETVAL_STRINGL(output, output_len, 0);
 		}
 	}
 
-	php_mb2_ustring_dtor(&ustr);
+out:
+	ucnv_close(conv);
+	php_mb2_ustring_dtor(&result);
 }
 /* }}} */
 
@@ -1176,7 +1020,7 @@ PHP_MB_FUNCTION(strwidth)
 		UChar32 c;
 		UEastAsianWidth ea;
 
-		if (U16_IS_SURROGATE(*p)) {
+		if (U16_IS_LEAD(*p)) {
 			assert(U16_IS_LEAD(*p) && p + 1 < e && U16_IS_TRAIL(*(p + 1)));
 			c = U16_GET_SUPPLEMENTARY(*p, *(p + 1));
 			p += 2;
@@ -1184,7 +1028,7 @@ PHP_MB_FUNCTION(strwidth)
 			c = *p;
 			p++;
 		}
-		retval += _php_mb2_get_eaw(c, ambiguous_as_half);
+		retval += _php_mb2_get_uchar_eaw(c, ambiguous_as_half);
 	}
 
 	RETVAL_LONG(retval);
@@ -1192,22 +1036,224 @@ PHP_MB_FUNCTION(strwidth)
 }
 /* }}} */
 
-/* {{{ proto string mb_strimwidth(string str, int start, int width [, string trimmarker [, string encoding]])
+/* {{{ proto string mb_strimwidth(string str, int start, [int width [, string trimmarker [, string encoding [, bool ambiguous_as_half [, bool offset_by_eaw]]]]])
    Trim the string in terminal width */
 PHP_MB_FUNCTION(strimwidth)
 {
 	char *str;
-	char *trimmarker;
-	int trimmarker_len;
-	char *encoding;
-	int encoding_len;
-	long from;
-	long width;
 	int str_len;
+	char *encoding = NULL;
+	int encoding_len;
+	char *marker = "";
+	int marker_len = 0;
+	long from, len;
+	int width, marker_width;
+	zend_bool ambiguous_as_half = FALSE, offset_by_eaw = FALSE;
+	zend_bool append_marker = FALSE;
+	php_mb2_ustring ustr, umarker;
+	UConverter *conv = NULL;
+	const UChar *start, *end;
+	UErrorCode err;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sll|ss", &str, &str_len, &from, &width, &trimmarker, &trimmarker_len, &encoding, &encoding_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|ls!s!bb", &str, &str_len, &from, &len, &marker, &marker_len, &encoding, &encoding_len, &ambiguous_as_half, &offset_by_eaw) == FAILURE) {
 		return;
 	}
+
+	if (ambiguous_as_half) {
+		/* make sure that the integer value is 1 */
+		ambiguous_as_half = 1;
+	}
+
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+
+	RETVAL_FALSE;
+
+	if (FAILURE == php_mb2_ustring_ctor(&ustr, FALSE)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the temporary buffer");
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor(&umarker, FALSE)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the temporary buffer");
+		php_mb2_ustring_dtor(&ustr);
+		return;
+	}
+
+	err = U_ZERO_ERROR;
+	conv = ucnv_open(encoding, &err);
+
+	if (U_FAILURE(err)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&ustr, str, str_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decoder the input as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&ustr, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decoder the input as %s", encoding);
+		goto out;
+	}
+
+	ucnv_reset(conv);
+
+	if (FAILURE == php_mb2_ustring_appendn(&umarker, marker, marker_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decoder the input as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&umarker, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decoder the input as %s", encoding);
+		goto out;
+	}
+
+	ucnv_reset(conv);
+
+	assert(SUCCESS == php_mb2_get_eaw(ustr.p, ustr.len, ambiguous_as_half, &width));
+	assert(SUCCESS == php_mb2_get_eaw(umarker.p, umarker.len, ambiguous_as_half, &marker_width));
+
+	if (ZEND_NUM_ARGS() > 2) {
+		if (len < 0) {
+			len = width + len;
+			if (len < 0) {
+				len = 0;
+			}
+		}
+	} else {
+		len = width;
+	}
+
+	if (offset_by_eaw) {
+		const UChar *p, *e;
+		int eawo = 0, to;
+
+		if (from < 0) {
+			from = width + from;
+			if (from < 0) {
+				from = 0;
+			}
+		}
+
+		to = from + len;
+		if (to < width) {
+			if (to - marker_len < from) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "The width of the trim marker (%d) exceeds the width of the range (%d)", marker_width, to - from);
+				goto out;
+			}
+			to -= marker_len;
+			append_marker = TRUE;
+		}
+
+		p = ustr.p;
+		e = ustr.p + ustr.len;
+		for (;;) {
+			UChar32 c;
+			if (eawo <= from) {
+				start = p;
+			}
+			if (eawo <= to) {
+				end = p;
+			}
+			if (p >= e) {
+				break;
+			}
+			if (U16_IS_LEAD(*p)) {
+				assert(p + 1 < e && U16_IS_TRAIL(*(p + 1)));
+				c = U16_GET_SUPPLEMENTARY(*p, *(p + 1));
+				p += 2;
+			} else {
+				c = *p;
+				p++;
+			}
+			eawo += _php_mb2_get_uchar_eaw(c, ambiguous_as_half);
+		}
+	} else {
+		const UChar *p, *e;
+		int eawo = 0, co = 0, to;
+
+		if (from < 0) {
+			from = u_countChar32(ustr.p, ustr.len) + from;
+			if (from < 0) {
+				from = 0;
+			}
+		}
+
+		to = width;
+		start = e = ustr.p + ustr.len;
+		p = ustr.p;
+		for (;;) {
+			UChar32 c;
+			if (co == from) {
+				start = p;
+				to = eawo + len;
+				if (to < width) {
+					if (to - marker_len < from) {
+						php_error_docref(NULL TSRMLS_CC, E_WARNING, "The width of the trim marker (%d) exceeds the width of the range (%d)", marker_width, to - from);
+						goto out;
+					}
+					to -= marker_len;
+					append_marker = TRUE;
+				}
+			}
+		   	if (eawo <= to) {
+				end = p;
+			}
+			if (p >= e) {
+				break;
+			}
+			if (U16_IS_LEAD(*p)) {
+				assert(p + 1 < e && U16_IS_TRAIL(*(p + 1)));
+				c = U16_GET_SUPPLEMENTARY(*p, *(p + 1));
+				p += 2;
+			} else {
+				c = *p;
+				p++;
+			}
+			co++;
+			eawo += _php_mb2_get_uchar_eaw(c, ambiguous_as_half);
+		}
+	}
+
+	if (!append_marker) {
+		char *output;
+		size_t output_len;
+		if (SUCCESS == php_mb2_encode(start, end - start, encoding, &output, &output_len, 0 TSRMLS_CC)) {
+			RETVAL_STRINGL(output, output_len, 0);
+		}
+	} else {
+		php_mb2_ustring result;
+		char *output;
+		size_t output_len;
+
+		if (FAILURE == php_mb2_ustring_ctor(&result, FALSE)) {
+			goto out;
+		}
+
+		if (FAILURE == php_mb2_ustring_appendu(&result, start, end - start)) {
+			php_mb2_ustring_dtor(&result);
+			goto out;
+		}
+
+		if (FAILURE == php_mb2_ustring_appendu(&result, umarker.p, umarker.len)) {
+			php_mb2_ustring_dtor(&result);
+			goto out;
+		}
+
+		if (SUCCESS == php_mb2_encode(result.p, result.len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
+			RETVAL_STRINGL(output, output_len, 0);
+		}
+
+		php_mb2_ustring_dtor(&result);
+	}
+
+out:
+	ucnv_close(conv);
+	php_mb2_ustring_dtor(&ustr);
+	php_mb2_ustring_dtor(&umarker);
 }
 /* }}} */
 
@@ -2328,6 +2374,35 @@ static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pret
 	}
 
 	*pretval = retval;
+	return SUCCESS;
+}
+
+static int php_mb2_get_eaw(const UChar *str, int32_t len, zend_bool ambiguous_as_half, int *retval)
+{
+	UErrorCode err;
+	const UChar *p, *e;
+	int _retval = 0;
+
+	if (ambiguous_as_half) {
+		ambiguous_as_half = 1;
+	}
+
+	for (p = str, e = str + len; p < e; ) {
+		UChar32 c;
+		if (U16_IS_LEAD(*p)) {
+			if (p + 1 >= e || U16_IS_TRAIL(*(p + 1))) {
+				return FAILURE;
+			}
+			c = U16_GET_SUPPLEMENTARY(*p, *(p + 1));
+			p += 2;
+		} else {
+			c = *p;
+			p++;
+		}
+		_retval += _php_mb2_get_uchar_eaw(c, ambiguous_as_half);
+	}
+
+	*retval = _retval;
 	return SUCCESS;
 }
 
