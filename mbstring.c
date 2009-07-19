@@ -627,17 +627,83 @@ PHP_MB_FUNCTION(strlen)
    Find position of first occurrence of a string within another */
 PHP_MB_FUNCTION(strpos)
 {
-	char *haystack_val;
+	char *haystack;
 	int haystack_len;
-	char *needle_val;
+	char *needle;
 	int needle_len;
-	char *enc_name = NULL;
-	int enc_name_len;
-	long offset;
+	char *encoding = NULL;
+	int encoding_len;
+	long offset = 0;
+	UConverter *conv;
+	UErrorCode err;
+	php_mb2_ustring haystack_ustr;
+	php_mb2_ustring needle_ustr;
+	const UChar *start;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|ls", &haystack_val, &haystack_len, &needle_val, &needle_len, &offset, &enc_name, &enc_name_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|ls", &haystack, &haystack_len, &needle, &needle_len, &offset, &encoding, &encoding_len) == FAILURE) {
 		return;
 	}
+
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+
+	RETVAL_FALSE;
+
+	if (php_mb2_ustring_ctor(&needle_ustr, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer");
+		return;
+	}
+
+	if (php_mb2_ustring_ctor(&haystack_ustr, 0)) {
+		php_mb2_ustring_dtor(&needle_ustr);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer");
+		return;
+	}
+
+	err = U_ZERO_ERROR;
+	conv = ucnv_open(encoding, &err);
+	if (U_FAILURE(err)) {
+		php_mb2_ustring_dtor(&needle_ustr);
+		php_mb2_ustring_dtor(&haystack_ustr);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&haystack_ustr, haystack, haystack_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"haystack\" as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&haystack_ustr, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"haystack\" as %s", encoding);
+		goto out;
+	}
+
+	if (offset < 0 || !(start = php_mb2_ustring_offset(&haystack_ustr, offset))) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Offset (%d) not contained in string", offset);
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&needle_ustr, needle, needle_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"needle\" as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&needle_ustr, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"needle\" as %s", encoding);
+		goto out;
+	}
+
+	{
+		const UChar *p = u_strFindFirst(start, (haystack_ustr.p + haystack_ustr.len) - start, needle_ustr.p, needle_ustr.len);
+		if (p) {
+			RETVAL_LONG(u_countChar32(haystack_ustr.p, p - haystack_ustr.p));
+		}
+	}
+out:
+	ucnv_close(conv);
+	php_mb2_ustring_dtor(&needle_ustr);
+	php_mb2_ustring_dtor(&haystack_ustr);
 }
 /* }}} */
 
@@ -645,59 +711,115 @@ PHP_MB_FUNCTION(strpos)
    Find position of last occurrence of a string within another */
 PHP_MB_FUNCTION(strrpos)
 {
-	int offset;
-	zval **zoffset;
-	char *haystack_val;
+	long offset = 0;
+	zval **zoffset = NULL;
+	char *haystack;
 	int haystack_len;
-	char *needle_val;
+	char *needle;
 	int needle_len;
-	char *enc_name = NULL;
-	int enc_name_len;
+	char *encoding = NULL;
+	int encoding_len;
+	UConverter *conv;
+	UErrorCode err;
+	php_mb2_ustring haystack_ustr;
+	php_mb2_ustring needle_ustr;
+	const UChar *start;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|Zs", &haystack_val, &haystack_len, &needle_val, &needle_len, &zoffset, &enc_name, &enc_name_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|Zs", &haystack, &haystack_len, &needle, &needle_len, &zoffset, &encoding, &encoding_len) == FAILURE) {
 		return;
 	}
 
+	RETVAL_FALSE;
+
+	/* tweak for backwards compatibility */
 	if (zoffset) {
 		if (Z_TYPE_PP(zoffset) == IS_STRING) {
-			char *enc_name2     = Z_STRVAL_PP(zoffset);
-			int enc_name_len2 = Z_STRLEN_PP(zoffset);
-			int str_flg       = 1;
+			char *_encoding   = Z_STRVAL_PP(zoffset);
+			int _encoding_len = Z_STRLEN_PP(zoffset);
+			double doffset;
 
-			if (enc_name2 != NULL) {
-				switch (*enc_name2) {
-				case '0':
-				case '1':
-				case '2':
-				case '3':
-				case '4':
-				case '5':
-				case '6':
-				case '7':
-				case '8':
-				case '9':
-				case ' ':
-				case '-':
-				case '.':
-					break;
-				default :
-					str_flg = 0;
-					break;
+			switch (is_numeric_string(_encoding, _encoding_len, &offset, &doffset, 1)) {
+			default:
+				if (encoding != NULL) {
+					php_error_docref(NULL TSRMLS_CC, E_WARNING, "The fourth argument is not applicable if the third argument is given a string");
+					return;
 				}
-			}
+				php_error_docref(NULL TSRMLS_CC, E_DEPRECATED, "Specifying the encoding to the third argument will no longer be supported in the future versions");
+				encoding     = _encoding;
+				encoding_len = _encoding_len;
+				break;
 
-			if (str_flg) {
-				convert_to_long_ex(zoffset);
-				offset   = Z_LVAL_PP(zoffset);
-			} else {
-				enc_name     = enc_name2;
-				enc_name_len = enc_name_len2;
+			case IS_LONG:
+				break;
+			case IS_DOUBLE:
+				offset = zend_dval_to_lval(doffset);
 			}
 		} else {
 			convert_to_long_ex(zoffset);
 			offset = Z_LVAL_PP(zoffset);
 		}
 	}
+
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+
+	if (php_mb2_ustring_ctor(&needle_ustr, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer");
+		return;
+	}
+
+	if (php_mb2_ustring_ctor(&haystack_ustr, 0)) {
+		php_mb2_ustring_dtor(&needle_ustr);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer");
+		return;
+	}
+
+	err = U_ZERO_ERROR;
+	conv = ucnv_open(encoding, &err);
+	if (U_FAILURE(err)) {
+		php_mb2_ustring_dtor(&needle_ustr);
+		php_mb2_ustring_dtor(&haystack_ustr);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&haystack_ustr, haystack, haystack_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"haystack\" as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&haystack_ustr, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"haystack\" as %s", encoding);
+		goto out;
+	}
+
+	if (offset >=0 && !(start = php_mb2_ustring_offset(&haystack_ustr, offset))
+			|| (offset < 0 && !(start = php_mb2_ustring_roffset(&haystack_ustr, -offset)))) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Offset (%d) is greater than the length of haystack string", offset);
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&needle_ustr, needle, needle_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"needle\" as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&needle_ustr, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"needle\" as %s", encoding);
+		goto out;
+	}
+
+	{
+		const UChar *p = u_strFindLast(start, (haystack_ustr.p + haystack_ustr.len) - start, needle_ustr.p, needle_ustr.len);
+		if (p) {
+			RETVAL_LONG(u_countChar32(haystack_ustr.p, p - haystack_ustr.p));
+		}
+	}
+out:
+	ucnv_close(conv);
+	php_mb2_ustring_dtor(&needle_ustr);
+	php_mb2_ustring_dtor(&haystack_ustr);
+
 }
 /* }}} */
 
