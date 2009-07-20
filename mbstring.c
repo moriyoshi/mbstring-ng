@@ -819,7 +819,6 @@ out:
 	ucnv_close(conv);
 	php_mb2_ustring_dtor(&needle_ustr);
 	php_mb2_ustring_dtor(&haystack_ustr);
-
 }
 /* }}} */
 
