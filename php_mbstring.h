@@ -29,6 +29,7 @@
 #if HAVE_MBSTRING_NG
 
 #include <unicode/utypes.h>
+#include <unicode/pwin32.h>
 
 #ifdef PHP_WIN32
 #	undef MBSTRING_NG_API
