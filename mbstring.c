@@ -1287,16 +1287,79 @@ out:
    Count the number of substring occurrences */
 PHP_MB_FUNCTION(substr_count)
 {
-	char *haystack_val;
+	char *haystack;
 	int haystack_len;
-	char *needle_val;
+	char *needle;
 	int needle_len;
-	char *enc_name = NULL;
-	int enc_name_len;
+	char *encoding = NULL;
+	int encoding_len;
+	UConverter *conv;
+	UErrorCode err;
+	php_mb2_ustring haystack_ustr;
+	php_mb2_ustring needle_ustr;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|s", &haystack_val, &haystack_len, &needle_val, &needle_len, &enc_name, &enc_name_len) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|s", &haystack, &haystack_len, &needle, &needle_len, &encoding, &encoding_len) == FAILURE) {
 		return;
 	}
+
+	if (!encoding) {
+		encoding = MBSTR_NG(ini).internal_encoding;
+	}
+
+	RETVAL_FALSE;
+
+	if (php_mb2_ustring_ctor(&needle_ustr, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer");
+		return;
+	}
+
+	if (php_mb2_ustring_ctor(&haystack_ustr, 0)) {
+		php_mb2_ustring_dtor(&needle_ustr);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer");
+		return;
+	}
+
+	err = U_ZERO_ERROR;
+	conv = ucnv_open(encoding, &err);
+	if (U_FAILURE(err)) {
+		php_mb2_ustring_dtor(&needle_ustr);
+		php_mb2_ustring_dtor(&haystack_ustr);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", encoding, u_errorName(err));
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&haystack_ustr, haystack, haystack_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"haystack\" as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&haystack_ustr, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"haystack\" as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&needle_ustr, needle, needle_len, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"needle\" as %s", encoding);
+		goto out;
+	}
+
+	if (FAILURE == php_mb2_ustring_appendn(&needle_ustr, NULL, 0, conv)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode \"needle\" as %s", encoding);
+		goto out;
+	}
+
+	{
+		long retval = 0;
+		const UChar *pl = haystack_ustr.p + haystack_ustr.len, *p, *pn;
+		for (p = haystack_ustr.p; p < pl && (pn = u_strFindFirst(p, pl - p, needle_ustr.p, needle_ustr.len)); p = pn + needle_ustr.len) {
+			retval++;
+		}
+		RETVAL_LONG(retval);
+	}
+out:
+	ucnv_close(conv);
+	php_mb2_ustring_dtor(&needle_ustr);
+	php_mb2_ustring_dtor(&haystack_ustr);
 }
 /* }}} */
 
