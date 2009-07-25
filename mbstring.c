@@ -2657,6 +2657,113 @@ out:
    split multibyte string into array by regular expression */
 PHP_MB_FUNCTION(split)
 {
+	char *pattern;
+	int pattern_len;
+	char *string;
+	int string_len;
+	long count = -1;
+	const char *encoding;
+	URegularExpression *rex;
+	php_mb2_ustring string_u;
+	UErrorCode err;
+	int32_t pos, start, end;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|l", &pattern, &pattern_len, &string, &string_len, &count) == FAILURE) {
+		return;
+	} 
+
+	encoding = MBSTR_NG(ini).internal_encoding;
+
+	if (count == 0) {
+		count = 1;
+	}
+
+	RETVAL_FALSE;
+
+	rex = php_mb2_regex_open(pattern, pattern_len, encoding, MBSTR_NG(runtime).regex_flags TSRMLS_CC);
+	if (!rex) {
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&string_u, string, string_len, encoding, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the string as %s", encoding);
+		return;
+	}
+
+	err = U_ZERO_ERROR;
+	uregex_setText(rex, string_u.p, string_u.len, &err);
+	if (U_FAILURE(err)) {
+		/* unlikely */
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+		php_mb2_ustring_dtor(&string_u);
+		return;
+	}
+
+	uregex_reset(rex, 0, &err);
+	if (U_FAILURE(err)) {
+		/* unlikely */
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+		php_mb2_ustring_dtor(&string_u);
+		return;
+	}
+
+	array_init(return_value);
+
+	/* churn through str, generating array entries as we go */
+	for (pos = 0; --count != 0; pos = end) {
+		if (!uregex_findNext(rex, &err)) {
+			break;
+		}
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to match the string (error: %s)", u_errorName(err));
+			goto fail;
+		}
+
+		start = uregex_start(rex, 0, &err);
+		if (U_FAILURE(err)) {
+			/* unlikely */
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+			goto fail;
+		}
+
+		end = uregex_end(rex, 0, &err);
+		if (U_FAILURE(err)) {
+			/* unlikely */
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+			goto fail;
+		}
+
+		/* add it to the array */
+		if (start < string_u.len && start > pos) {
+			char *part;
+			int32_t part_len;
+			if (FAILURE == php_mb2_encode(string_u.p + pos, start - pos, encoding, &part, &part_len, 0 TSRMLS_CC)) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for results");
+				goto fail;
+			}
+			add_next_index_stringl(return_value, part, part_len, 0);
+		} else {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Empty region is not allowed");
+			goto fail;
+		}
+	}
+	{
+		char *part;
+		int32_t part_len;
+		if (FAILURE == php_mb2_encode(string_u.p + pos, string_u.len - pos, encoding, &part, &part_len, 0 TSRMLS_CC)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for results");
+			goto fail;
+		}
+		add_next_index_stringl(return_value, part, part_len, 0);
+	}
+
+	php_mb2_ustring_dtor(&string_u);
+	return;
+fail:
+	zval_dtor(return_value);
+	php_mb2_ustring_dtor(&string_u);
+	RETURN_FALSE;
+
 }
 /* }}} */
 
