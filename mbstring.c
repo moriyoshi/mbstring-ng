@@ -2332,6 +2332,9 @@ static void _php_mb2_regex_init_options(const char *opt_str, size_t opt_str_len,
 		case 'p':
 			flags |= UREGEX_MULTILINE | UREGEX_DOTALL;
 			break;
+		case 'U':
+			flags |= UREGEX_UNIX_LINES;
+			break;
 		default:
 			break;
 		}
