@@ -749,7 +749,7 @@ PHP_MB_FUNCTION(output_handler)
 						UBool result = FALSE;
 						uregex_setText(rex, mimetype_u.p, mimetype_u.len, &err);
 						if (U_SUCCESS(err)) {
-							result = uregex_lookingAt(rex, 0, &err);
+							result = uregex_find(rex, -1, &err);
 						}
 						if (U_FAILURE(err)) {
 							php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to match the regular expression");
