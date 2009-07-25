@@ -732,7 +732,7 @@ PHP_MB_FUNCTION(output_handler)
 		const char *in_enc = MBSTR_NG(ini).internal_encoding;
 		const char *out_enc = MBSTR_NG(ini).http_output;
 		UConverter *from_conv, *to_conv;
-		if (out_enc && strcasecmp(out_enc, "pass") == 0 || !*out_enc) {
+		if (out_enc && strcasecmp(out_enc, "pass") == 0) {
 			RETURN_FALSE;
 		}
 
@@ -766,7 +766,7 @@ PHP_MB_FUNCTION(output_handler)
 					php_mb2_ustring_dtor(&mimetype_u);
 				}
 
-				if (!out_enc) {
+				if (!out_enc || !*out_enc) {
 					out_enc = mimetype_buf.charset;
 				}
 			}
