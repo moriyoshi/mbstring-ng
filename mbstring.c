@@ -2836,6 +2836,10 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 				ctx.pdl = new_dbuf + new_dbuf_size;
 			}
 		}
+
+		ucnv_close(from_conv);
+		from_conv = NULL;
+
 		if (U_SUCCESS(err)) {
 			break;
 		}
@@ -2843,9 +2847,6 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert from %s to %s (error: %s)", *from_encoding, to_encoding, u_errorName(err));
 			goto fail;
 		}
-
-		ucnv_close(from_conv);
-		from_conv = NULL;
 	}
 
 	if (from_encoding == e) {
