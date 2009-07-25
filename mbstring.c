@@ -106,10 +106,10 @@ static PHP_MB_FUNCTION(detect_encoding);
 static PHP_MB_FUNCTION(list_encodings);
 
 static PHP_MB_FUNCTION(ereg);
-static PHP_MB_FUNCTION(eregi);
 static PHP_MB_FUNCTION(ereg_replace);
 static PHP_MB_FUNCTION(eregi_replace);
 static PHP_MB_FUNCTION(split);
+static PHP_MB_FUNCTION(regex_set_options);
 
 static void php_mb2_char_ptr_list_ctor(php_mb2_char_ptr_list *list, int persistent);
 static void php_mb2_char_ptr_list_dtor(php_mb2_char_ptr_list *list);
@@ -277,12 +277,6 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_ereg, 0, 0, 2)
 	ZEND_ARG_INFO(1, registers)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_eregi, 0, 0, 2)
-	ZEND_ARG_INFO(0, pattern)
-	ZEND_ARG_INFO(0, string)
-	ZEND_ARG_INFO(1, registers)
-ZEND_END_ARG_INFO()
-
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_ereg_replace, 0, 0, 3)
 	ZEND_ARG_INFO(0, pattern)
 	ZEND_ARG_INFO(0, replacement)
@@ -332,6 +326,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_ereg_search_setpos, 0, 0, 1)
 	ZEND_ARG_INFO(0, position)
 ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_regex_set_options, 0, 0, 0)
+	ZEND_ARG_INFO(0, options)
+ZEND_END_ARG_INFO()
 /* }}} */
 
 /* {{{ zend_function_entry mbstring_ng_functions[] */
@@ -359,10 +357,10 @@ const zend_function_entry mbstring_ng_functions[] = {
 	PHP_MB_FE(detect_encoding,		arginfo_mb_detect_encoding)
 	PHP_MB_FE(list_encodings,		arginfo_mb_list_encodings)
 	PHP_MB_FE(ereg,					arginfo_mb_ereg)
-	PHP_MB_FE(eregi,				arginfo_mb_eregi)
 	PHP_MB_FE(ereg_replace,			arginfo_mb_ereg_replace)
 	PHP_MB_FE(eregi_replace,		arginfo_mb_eregi_replace)
 	PHP_MB_FE(split,				arginfo_mb_split)
+	PHP_MB_FE(regex_set_options,	arginfo_mb_regex_set_options)
 	{ NULL, NULL, NULL }
 };
 /* }}} */
@@ -516,6 +514,7 @@ static void php_mb2_regex_cache_dtor_cb(URegularExpression *rex)
 static PHP_RINIT_FUNCTION(mbstring_ng)
 {
 	zend_hash_init(&MBSTR_NG(runtime).regex_cache, 0, NULL, (dtor_func_t)php_mb2_regex_cache_dtor_cb, 0);
+	MBSTR_NG(runtime).regex_flags = UREGEX_MULTILINE | UREGEX_DOTALL;
 	return SUCCESS;
 }
 /* }}} */
@@ -2350,7 +2349,9 @@ PHP_MB_FUNCTION(list_encodings)
 }
 /* }}} */
 
-static void _php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAMETERS, uint32_t flags)
+/* {{{ proto int mb_ereg(string pattern, string string [, array registers])
+   Regular expression match for multibyte string */
+PHP_MB_FUNCTION(ereg)
 {
 	char *pattern;
 	int pattern_len;
@@ -2370,7 +2371,7 @@ static void _php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAMETERS, uint32_t flag
 
 	RETVAL_FALSE;
 
-	rex = php_mb2_regex_open(pattern, pattern_len, encoding, flags TSRMLS_CC);
+	rex = php_mb2_regex_open(pattern, pattern_len, encoding, MBSTR_NG(runtime).regex_flags TSRMLS_CC);
 	if (!rex) {
 		return;
 	}
@@ -2463,21 +2464,6 @@ static void _php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAMETERS, uint32_t flag
 out:
 	php_mb2_ustring_dtor(&string_u);
 }
-
-/* {{{ proto int mb_ereg(string pattern, string string [, array registers])
-   Regular expression match for multibyte string */
-PHP_MB_FUNCTION(ereg)
-{
-	_php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0);
-}
-/* }}} */
-
-/* {{{ proto int mb_eregi(string pattern, string string [, array registers])
-   Case-insensitive regular expression match for multibyte string */
-PHP_MB_FUNCTION(eregi)
-{
-	_php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAM_PASSTHRU, UREGEX_CASE_INSENSITIVE);
-}
 /* }}} */
 
 /* {{{ proto string mb_ereg_replace(string pattern, string replacement, string string [, string option])
@@ -2498,6 +2484,135 @@ PHP_MB_FUNCTION(eregi_replace)
    split multibyte string into array by regular expression */
 PHP_MB_FUNCTION(split)
 {
+}
+/* }}} */
+
+static void _php_mb2_regex_init_options(const char *opt_str, size_t opt_str_len, uint32_t *retval) 
+{
+	const char *p = opt_str, *pe = opt_str + opt_str_len;
+	uint32_t flags = 0; 
+
+	while (p < pe) {
+		switch (*p) {
+		case 'i':
+			flags |= UREGEX_CASE_INSENSITIVE;
+			break;
+		case 'x':
+			flags |= UREGEX_COMMENTS;
+			break;
+		case 'm':
+			flags |= UREGEX_MULTILINE;
+			break;
+		case 's':
+			flags |= UREGEX_DOTALL;
+			break;
+		case 'p':
+			flags |= UREGEX_MULTILINE | UREGEX_DOTALL;
+			break;
+		default:
+			break;
+		}
+		p++;
+	}
+	*retval = flags;
+}
+
+static size_t _php_mb2_regex_get_option_string(char *str, size_t len, uint32_t flags)
+{
+	size_t len_left = len;
+	size_t len_req = 0;
+	char *p = str;
+	char c;
+
+	if ((flags & UREGEX_CASE_INSENSITIVE) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'i';
+		}
+		++len_req;	
+	}
+
+	if ((flags & UREGEX_COMMENTS) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'x';
+		}
+		++len_req;	
+	}
+
+	if ((flags & (UREGEX_MULTILINE | UREGEX_DOTALL)) ==
+			(UREGEX_MULTILINE | UREGEX_DOTALL)) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'p';
+		}
+		++len_req;	
+	} else {
+		if ((flags & UREGEX_MULTILINE) != 0) {
+			if (len_left > 0) {
+				--len_left;
+				*(p++) = 'm';
+			}
+			++len_req;	
+		}
+
+		if ((flags & UREGEX_DOTALL) != 0) {
+			if (len_left > 0) {
+				--len_left;
+				*(p++) = 's';
+			}
+			++len_req;	
+		}
+	}	
+	if ((flags & UREGEX_CANON_EQ) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'N';
+		}
+		++len_req;	
+	}
+	if ((flags & UREGEX_UNIX_LINES) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'U';
+		}
+		++len_req;	
+	}
+
+	if (len_left > 0) {
+		--len_left;
+		*(p++) = '\0';
+	}
+	++len_req;	
+	if (len < len_req) {
+		return len_req;
+	}
+
+	return 0;
+}
+
+/* {{{ proto string mb_regex_set_options([string options])
+   Set or get the default options for mbregex functions */
+PHP_MB_FUNCTION(regex_set_options)
+{
+	uint32_t flags = 0;
+	char *string = NULL;
+	int string_len;
+	char buf[16];
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|s",
+	                          &string, &string_len) == FAILURE) {
+		RETURN_FALSE;
+	}
+	if (string) {
+		_php_mb2_regex_init_options(string, string_len, &flags);
+		MBSTR_NG(runtime).regex_flags = flags;
+	} else {
+		flags = MBSTR_NG(runtime).regex_flags;
+	}
+	_php_mb2_regex_get_option_string(buf, sizeof(buf), flags);
+
+	RETVAL_STRING(buf, 1);
 }
 /* }}} */
 
