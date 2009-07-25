@@ -781,21 +781,21 @@ PHP_MB_FUNCTION(output_handler)
 		ctx->pvbuf = NULL;
 		cctx->dbuf = NULL;
 		cctx->persistent = 0;
-		cctx->unassigned_subst_char_u = MBSTR_NG(ini).subst_string_unassigned.p;
-		cctx->unassigned_subst_char_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
-		cctx->illegal_subst_char_u = MBSTR_NG(ini).subst_string_illegal.p;
-		cctx->illegal_subst_char_u_len = MBSTR_NG(ini).subst_string_illegal.len;
+		cctx->unassigned_subst_str_u = MBSTR_NG(ini).subst_string_unassigned.p;
+		cctx->unassigned_subst_str_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
+		cctx->illegal_subst_str_u = MBSTR_NG(ini).subst_string_illegal.p;
+		cctx->illegal_subst_str_u_len = MBSTR_NG(ini).subst_string_illegal.len;
 #ifdef ZTS
 		cctx->TSRMLS_C = TSRMLS_C;
 #endif
 		ctx->pvbuf_basic_len = chunk_len;
 
-		if (ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len < ctx->pvbuf_basic_len || sizeof(UChar) * (ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len) / sizeof(UChar) != ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len) {
+		if (ctx->pvbuf_basic_len + cctx->unassigned_subst_str_u_len < ctx->pvbuf_basic_len || sizeof(UChar) * (ctx->pvbuf_basic_len + cctx->unassigned_subst_str_u_len) / sizeof(UChar) != ctx->pvbuf_basic_len + cctx->unassigned_subst_str_u_len) {
 			php_mb2_mime_type_buf_dtor(&mimetype_buf);
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer");
 			goto fail;
 		}
-		ctx->ppvs = ctx->ppvd = ctx->pvbuf = safe_emalloc(ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len, sizeof(UChar), 0);
+		ctx->ppvs = ctx->ppvd = ctx->pvbuf = safe_emalloc(ctx->pvbuf_basic_len + cctx->unassigned_subst_str_u_len, sizeof(UChar), 0);
 
 		err = U_ZERO_ERROR;
 		to_conv = ucnv_open(out_enc, &err);
@@ -2647,8 +2647,8 @@ static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverte
 	switch (reason) {
 	case UCNV_UNASSIGNED:
 		php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Unrepresentable character U+%06x", codePoint);
-		if (ctx->unassigned_subst_char_u && !MBSTR_NG(runtime).in_ucnv_error_handler) {
-			const UChar *ps = ctx->unassigned_subst_char_u, *psl = ctx->unassigned_subst_char_u + ctx->unassigned_subst_char_u_len;
+		if (ctx->unassigned_subst_str_u && !MBSTR_NG(runtime).in_ucnv_error_handler) {
+			const UChar *ps = ctx->unassigned_subst_str_u, *psl = ctx->unassigned_subst_str_u + ctx->unassigned_subst_str_u_len;
 			MBSTR_NG(runtime).in_ucnv_error_handler = TRUE;
 			for (;;) {
 				size_t new_dbuf_size;
@@ -2677,7 +2677,7 @@ static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverte
 	case UCNV_IRREGULAR:
 	case UCNV_ILLEGAL:
 		if (!MBSTR_NG(runtime).in_ucnv_error_handler) {
-			const UChar *ps = ctx->illegal_subst_char_u, *psl = ctx->illegal_subst_char_u + ctx->illegal_subst_char_u_len;
+			const UChar *ps = ctx->illegal_subst_str_u, *psl = ctx->illegal_subst_str_u + ctx->illegal_subst_str_u_len;
 			MBSTR_NG(runtime).in_ucnv_error_handler = TRUE;
 			for (;;) {
 				size_t new_dbuf_size;
@@ -2717,11 +2717,11 @@ static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterT
 	case UCNV_UNASSIGNED:
 	case UCNV_IRREGULAR:
 	case UCNV_ILLEGAL:
-		if (args->targetLimit - args->target < ctx->illegal_subst_char_u_len) {
-			args->targetLimit = args->target + ctx->illegal_subst_char_u_len;
+		if (args->targetLimit - args->target < ctx->illegal_subst_str_u_len) {
+			args->targetLimit = args->target + ctx->illegal_subst_str_u_len;
 		}
-		memmove(args->target, ctx->illegal_subst_char_u, sizeof(UChar) * ctx->illegal_subst_char_u_len);
-		args->target += ctx->illegal_subst_char_u_len;
+		memmove(args->target, ctx->illegal_subst_str_u, sizeof(UChar) * ctx->illegal_subst_str_u_len);
+		args->target += ctx->illegal_subst_str_u_len;
 		*err = U_ZERO_ERROR;
 		break;
 	default:
@@ -2744,20 +2744,20 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 	php_mb2_uconverter_callback_ctx ctx;
 	ctx.dbuf = NULL;
 	ctx.persistent = persistent;
-	ctx.unassigned_subst_char_u = MBSTR_NG(ini).subst_string_unassigned.p;
-	ctx.unassigned_subst_char_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
-	ctx.illegal_subst_char_u = MBSTR_NG(ini).subst_string_illegal.p;
-	ctx.illegal_subst_char_u_len = MBSTR_NG(ini).subst_string_illegal.len;
+	ctx.unassigned_subst_str_u = MBSTR_NG(ini).subst_string_unassigned.p;
+	ctx.unassigned_subst_str_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
+	ctx.illegal_subst_str_u = MBSTR_NG(ini).subst_string_illegal.p;
+	ctx.illegal_subst_str_u_len = MBSTR_NG(ini).subst_string_illegal.len;
 #ifdef ZTS
 	ctx.TSRMLS_C = TSRMLS_C;
 #endif
 	MBSTR_NG(runtime).in_ucnv_error_handler = FALSE;
 
-	if (pvbuf_basic_len + ctx.unassigned_subst_char_u_len < pvbuf_basic_len || sizeof(UChar) * (pvbuf_basic_len + ctx.unassigned_subst_char_u_len) / sizeof(UChar) != pvbuf_basic_len + ctx.unassigned_subst_char_u_len) {
+	if (pvbuf_basic_len + ctx.unassigned_subst_str_u_len < pvbuf_basic_len || sizeof(UChar) * (pvbuf_basic_len + ctx.unassigned_subst_str_u_len) / sizeof(UChar) != pvbuf_basic_len + ctx.unassigned_subst_str_u_len) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer");
 		return FAILURE;
 	}
-	pvbuf = do_alloca_ex(sizeof(UChar) * (pvbuf_basic_len + ctx.unassigned_subst_char_u_len), 4096, use_heap);
+	pvbuf = do_alloca_ex(sizeof(UChar) * (pvbuf_basic_len + ctx.unassigned_subst_str_u_len), 4096, use_heap);
 
 	to_conv = ucnv_open(to_encoding, &err);
 	if (!to_conv) {
@@ -2894,10 +2894,10 @@ static int php_mb2_encode(const UChar *input, size_t length, const char *to_enco
 	php_mb2_uconverter_callback_ctx ctx;
 	ctx.dbuf = NULL;
 	ctx.persistent = persistent;
-	ctx.unassigned_subst_char_u = MBSTR_NG(ini).subst_string_unassigned.p;
-	ctx.unassigned_subst_char_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
-	ctx.illegal_subst_char_u = MBSTR_NG(ini).subst_string_illegal.p;
-	ctx.illegal_subst_char_u_len = MBSTR_NG(ini).subst_string_illegal.len;
+	ctx.unassigned_subst_str_u = MBSTR_NG(ini).subst_string_unassigned.p;
+	ctx.unassigned_subst_str_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
+	ctx.illegal_subst_str_u = MBSTR_NG(ini).subst_string_illegal.p;
+	ctx.illegal_subst_str_u_len = MBSTR_NG(ini).subst_string_illegal.len;
 #ifdef ZTS
 	TSRMLS_C = TSRMLS_C;
 #endif

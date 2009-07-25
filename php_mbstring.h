@@ -70,10 +70,10 @@ typedef struct php_mb2_uconverter_callback_ctx {
 	char *dbuf;
 	char *pdl;
 	int persistent;
-	const UChar *unassigned_subst_char_u;
-	int32_t unassigned_subst_char_u_len;
-	const UChar *illegal_subst_char_u;
-	int32_t illegal_subst_char_u_len;
+	const UChar *unassigned_subst_str_u;
+	int32_t unassigned_subst_str_u_len;
+	const UChar *illegal_subst_str_u;
+	int32_t illegal_subst_str_u_len;
 #ifdef ZTS
 	TSRMLS_D;
 #endif
