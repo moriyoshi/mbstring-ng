@@ -2475,7 +2475,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 	ctx.subst_char_u = MBSTR_NG(ini).substitute_character.p;
 	ctx.subst_char_u_len = MBSTR_NG(ini).substitute_character.len;
 #ifdef ZTS
-	TSRMLS_C = TSRMLS_C;
+	ctx.TSRMLS_C = TSRMLS_C;
 #endif
 	MBSTR_NG(runtime).in_ucnv_error_handler = FALSE;
 
