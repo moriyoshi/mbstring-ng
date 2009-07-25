@@ -138,7 +138,7 @@ static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverte
 static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterToUnicodeArgs *args, const char *units, int32_t length, UConverterCallbackReason reason, UErrorCode *err);
 static int php_mb2_parse_mime_type(php_mb2_mime_type_buf *retval, const char *header, size_t header_len);
 static void php_mb2_mime_type_buf_dtor(php_mb2_mime_type_buf *buf);
-
+static URegularExpression *php_mb2_regex_open(const char *pattern, int32_t pattern_len, const char *encoding TSRMLS_DC);
 
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_internal_encoding, 0, 0, 0)
@@ -515,9 +515,15 @@ static PHP_MSHUTDOWN_FUNCTION(mbstring_ng)
 }
 /* }}} */
 
+static void php_mb2_regex_cache_dtor_cb(URegularExpression *rex)
+{
+	uregex_close(rex);
+}
+
 /* {{{ PHP_RINIT_FUNCTION(mbstring_ng) */
 static PHP_RINIT_FUNCTION(mbstring_ng)
 {
+	zend_hash_init(&MBSTR_NG(runtime).regex_cache, 0, NULL, (dtor_func_t)php_mb2_regex_cache_dtor_cb, 0);
 	return SUCCESS;
 }
 /* }}} */
@@ -525,6 +531,7 @@ static PHP_RINIT_FUNCTION(mbstring_ng)
 /* {{{ PHP_RSHUTDOWN_FUNCTION(mbstring_ng) */
 static PHP_RSHUTDOWN_FUNCTION(mbstring_ng)
 {
+	zend_hash_destroy(&MBSTR_NG(runtime).regex_cache);
 	{
 		php_mb2_output_handler_ctx *ctx = &MBSTR_NG(runtime).output_handler;
 
@@ -2355,6 +2362,116 @@ PHP_MB_FUNCTION(list_encodings)
    Regular expression match for multibyte string */
 PHP_MB_FUNCTION(ereg)
 {
+	char *pattern;
+	int pattern_len;
+	char *string;
+	int string_len;
+	zval **capture = NULL;
+	URegularExpression *rex;
+	php_mb2_ustring string_u;
+	UErrorCode err;
+	const char *encoding;
+
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ss|Z", &pattern, &pattern_len, &string, &string_len, &capture) == FAILURE) {
+		return;
+	}
+
+	encoding = MBSTR_NG(ini).internal_encoding;
+
+	RETVAL_FALSE;
+
+	rex = php_mb2_regex_open(pattern, pattern_len, encoding TSRMLS_CC);
+	if (!rex) {
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&string_u, string, string_len, encoding, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the string as %s", encoding);
+		return;
+	}
+
+	err = U_ZERO_ERROR;
+	uregex_setText(rex, string_u.p, string_u.len, &err);
+	if (U_FAILURE(err)) {
+		/* unlikely */
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+		goto out;
+	}
+
+	uregex_useAnchoringBounds(rex, TRUE, &err);
+	if (U_FAILURE(err)) {
+		/* unlikely */
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+		goto out;
+	}
+
+	{
+		int32_t max_group_idx, i;
+		zval _capture;
+
+		UBool matched = uregex_find(rex, -1, &err);
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to match the string (error: %s)", u_errorName(err));
+			goto out;
+		}
+
+		if (!matched) {
+			goto out;
+		}
+
+		if (!capture) {
+			RETVAL_LONG(1);
+			goto out;
+		}
+
+		_capture = **capture;
+		array_init(&_capture);
+
+		max_group_idx = uregex_groupCount(rex, &err);
+		if (U_FAILURE(err)) {
+			/* unlikely */
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+			goto out;
+		}
+
+		for (i = 0; i <= max_group_idx; i++) {
+			int32_t start, len;
+			char *group;
+			size_t group_len;
+
+			start = uregex_start(rex, i, &err);
+
+			if (U_FAILURE(err)) {
+				/* unlikely */
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+				goto out;
+			}
+
+			len = uregex_end(rex, i, &err) - start;
+			if (U_FAILURE(err)) {
+				/* unlikely */
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+				goto out;
+			}
+
+			if (i == 0) {
+				RETVAL_LONG(len == 0 ? 1: len);
+			}
+
+			if (FAILURE == php_mb2_encode(string_u.p + start, len, encoding, &group, &group_len, 0 TSRMLS_CC)) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to encode the capture group #%d", i);
+				zval_dtor(&_capture);
+				goto out;
+			}
+
+			add_index_stringl(&_capture, i, group, group_len, 0);
+		}
+		zval_dtor(*capture);
+		**capture = _capture;
+	}
+
+out:
+	php_mb2_ustring_dtor(&string_u);
 }
 /* }}} */
 
@@ -3507,6 +3624,86 @@ static int php_mb2_parse_mime_type(php_mb2_mime_type_buf *retval, const char *he
 	}
 done:
 	return SUCCESS;
+}
+
+static void php_mb2_zend_hash_remove_first(HashTable *ht)
+{
+	Bucket *list_head = ht->pListHead;
+	uint bucket_idx = list_head->h & ht->nTableMask;
+	HANDLE_BLOCK_INTERRUPTIONS();
+	if (ht->arBuckets[bucket_idx] == list_head) {
+		ht->arBuckets[bucket_idx] = list_head->pNext;
+	} else {
+		list_head->pLast->pNext = list_head->pNext;
+	}
+	if (list_head->pNext) {
+		list_head->pNext->pLast = list_head->pLast;
+	}
+	if (list_head->pListLast != NULL) {
+		list_head->pListLast->pListNext = list_head->pListNext;
+	} else { 
+		ht->pListHead = list_head->pListNext;
+	}
+	if (list_head->pListNext != NULL) {
+		list_head->pListNext->pListLast = list_head->pListLast;
+	} else {
+		ht->pListTail = list_head->pListLast;
+	}
+	if (ht->pInternalPointer == list_head) {
+		ht->pInternalPointer = list_head->pListNext;
+	}
+	if (ht->pDestructor) {
+		ht->pDestructor(list_head->pData);
+	}
+	if (list_head->pData != &list_head->pDataPtr) {
+		pefree(list_head->pData, ht->persistent);
+	}
+	pefree(list_head, ht->persistent);
+	HANDLE_UNBLOCK_INTERRUPTIONS();
+	ht->nNumOfElements--;
+}
+
+static URegularExpression *php_mb2_regex_open(const char *pattern, int32_t pattern_len, const char *encoding TSRMLS_DC)
+{
+	php_mb2_ustring pattern_u;
+	ulong pattern_hash;
+	URegularExpression *retval = NULL, **tmp_rex;
+	HashTable *regex_cache = &MBSTR_NG(runtime).regex_cache;
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&pattern_u, pattern, pattern_len, encoding, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert pattern string to Unicode");
+		return NULL;
+	}
+
+	pattern_hash = zend_inline_hash_func((const char *)pattern_u.p, (uint)pattern_u.len);
+	if (FAILURE == zend_hash_quick_find(regex_cache, (const char *)pattern_u.p, (uint)pattern_u.len, pattern_hash, (void **)&tmp_rex)) {
+		UErrorCode err = U_ZERO_ERROR;
+		UParseError parse_err;
+		retval = uregex_open(pattern_u.p, pattern_u.len, 0, &parse_err, &err);
+		if (U_FAILURE(err)) {
+			zend_bool use_heap;
+			char *tmp = do_alloca(pattern_len + 1, use_heap);
+			memcpy(tmp, pattern, pattern_len);
+			tmp[pattern_len] = '\0';
+			if (err >= U_REGEX_ERROR_START && err < U_REGEX_ERROR_LIMIT) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to parse pattern string \"%s\" (offset: %d, error: %s)", tmp, parse_err.offset, u_errorName(err));
+			} else {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to compile pattern string \"%s\" (error: %s)", tmp, u_errorName(err));
+			}
+			free_alloca(tmp, use_heap);
+			retval = NULL;
+			goto out;
+		}
+		if (regex_cache->nNumOfElements >= PHP_MBREGEX_MAXCACHE) {
+			/* LRU cache */
+			php_mb2_zend_hash_remove_first(regex_cache);
+		}
+		zend_hash_quick_add(regex_cache, (const char *)pattern_u.p, (uint)pattern_u.len, pattern_hash, &retval, sizeof(retval), NULL);
+	} else {
+		retval = *tmp_rex;
+	}
+out:
+	php_mb2_ustring_dtor(&pattern_u);
+	return retval;
 }
 
 #endif	/* HAVE_MBSTRING */

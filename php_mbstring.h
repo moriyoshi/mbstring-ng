@@ -103,6 +103,7 @@ ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
     struct {
         int in_ucnv_error_handler;
         php_mb2_output_handler_ctx output_handler;
+        HashTable regex_cache;
     } runtime;
 ZEND_END_MODULE_GLOBALS(mbstring_ng)
 
