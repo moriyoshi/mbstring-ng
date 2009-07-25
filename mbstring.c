@@ -32,7 +32,9 @@
 #include <unicode/ustring.h>
 
 #include "php.h"
+#include "php_variables.h"
 #include "php_ini.h"
+#include "SAPI.h"
 #include "ext/standard/php_string.h"
 #include "ext/standard/php_mail.h"
 #include "ext/standard/exec.h"
@@ -114,6 +116,10 @@ static const UChar *php_mb2_ustring_offset(const php_mb2_ustring *, int32_t offs
 static const UChar *php_mb2_ustring_roffset(const php_mb2_ustring *ustr, int32_t offset);
 static void php_mb2_ustring_dtor(php_mb2_ustring *str);
 static int php_mb2_get_eaw(const UChar *str, int32_t len, zend_bool ambiguous_as_half, int *retval);
+static unsigned int php_mb2_sapi_filter(int arg, char *var, char **val, unsigned int val_len, unsigned int *new_val_len TSRMLS_DC);
+static unsigned int php_mb2_sapi_filter_init(TSRMLS_D);
+static php_mb2_register_sapi_filter(TSRMLS_C);
+static php_mb2_unregister_sapi_filter(TSRMLS_C);
 
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_internal_encoding, 0, 0, 0)
@@ -351,8 +357,14 @@ const zend_function_entry mbstring_ng_functions[] = {
 /* }}} */
 
 /* {{{ zend_module_entry mbstring_module_entry */
+static zend_module_dep mbstring_ng_module_dep[] = {
+	ZEND_MOD_REQUIRED("filter")
+	{ NULL }
+};
+
 zend_module_entry mbstring_ng_module_entry = {
-	STANDARD_MODULE_HEADER,
+	STANDARD_MODULE_HEADER_EX,
+	NULL, mbstring_ng_module_dep,
 	"mbstring_ng",
 	mbstring_ng_functions,
 	PHP_MINIT(mbstring_ng),
@@ -419,6 +431,9 @@ static PHP_GINIT_FUNCTION(mbstring_ng)
 }
 /* }}} */
 
+static unsigned int (*php_mb2_next_input_filter)(int arg, char *var, char **val, unsigned int val_len, unsigned int *new_val_len TSRMLS_DC);
+static unsigned int (*php_mb2_next_input_filter_init)(TSRMLS_D);
+
 /* {{{ PHP_GSHUTDOWN_FUNCTION */
 static PHP_GSHUTDOWN_FUNCTION(mbstring_ng)
 {
@@ -433,6 +448,7 @@ static PHP_MINIT_FUNCTION(mbstring_ng)
 {
 	REGISTER_INI_ENTRIES();
 
+	php_mb2_register_sapi_filter();
 	return SUCCESS;
 }
 /* }}} */
@@ -441,6 +457,8 @@ static PHP_MINIT_FUNCTION(mbstring_ng)
 static PHP_MSHUTDOWN_FUNCTION(mbstring_ng)
 {
 	UNREGISTER_INI_ENTRIES();
+
+	php_mb2_unregister_sapi_filter();
 	return SUCCESS;
 }
 /* }}} */
@@ -573,14 +591,39 @@ PHP_MB_FUNCTION(preferred_mime_name)
    Parses GET/POST/COOKIE data and sets global variables */
 PHP_MB_FUNCTION(parse_str)
 {
-	zval *track_vars_array = NULL;
+	zval **track_vars_array = NULL;
 	char *encstr = NULL;
 	int encstr_len;
+	char *res;
+	zend_bool old_ini_val;
 
 	track_vars_array = NULL;
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|z", &encstr, &encstr_len, &track_vars_array) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|Z", &encstr, &encstr_len, &track_vars_array) == FAILURE) {
 		return;
 	}
+
+	old_ini_val = MBSTR_NG(ini).encoding_translation;
+	MBSTR_NG(ini).encoding_translation = TRUE;
+
+	res = estrndup(encstr, encstr_len);
+
+	if (track_vars_array == NULL) {
+		zval tmp;
+
+		if (!EG(active_symbol_table)) {
+			zend_rebuild_symbol_table(TSRMLS_C);
+		}
+		Z_ARRVAL(tmp) = EG(active_symbol_table);
+		sapi_module.treat_data(PARSE_STRING, res, &tmp TSRMLS_CC);
+	} else 	{
+		/* Clear out the array that was passed in. */
+		zval_dtor(*track_vars_array);
+		array_init(*track_vars_array);
+		
+		sapi_module.treat_data(PARSE_STRING, res, *track_vars_array TSRMLS_CC);
+	}
+
+	MBSTR_NG(ini).encoding_translation = old_ini_val;
 }
 /* }}} */
 
@@ -2990,6 +3033,60 @@ static int php_mb2_get_eaw(const UChar *str, int32_t len, zend_bool ambiguous_as
 
 	*retval = _retval;
 	return SUCCESS;
+}
+
+static unsigned int php_mb2_sapi_filter(int arg, char *var, char **val, unsigned int val_len, unsigned int *new_val_len TSRMLS_DC)
+{
+	char *new_val;
+	size_t _new_val_len;
+
+	*new_val_len = val_len;
+
+	if (!MBSTR_NG(ini).encoding_translation) {
+		return 1;
+	}
+
+	if (MBSTR_NG(ini).http_input.nitems == 0 || strcasecmp(MBSTR_NG(ini).http_input.items[0], "pass") == 0) {
+		return 1;
+	}
+
+	if (FAILURE == php_mb2_convert_encoding(*val, val_len, MBSTR_NG(ini).internal_encoding, MBSTR_NG(ini).http_input.items, MBSTR_NG(ini).http_input.nitems, &new_val, &_new_val_len, 0 TSRMLS_CC)) {
+		return 0;
+	}
+
+	assert((size_t)(unsigned int)_new_val_len == _new_val_len);
+	efree(*val);
+	if (php_mb2_next_input_filter) {
+		char *__new_val = new_val;
+		unsigned int __new_val_len;
+		if (php_mb2_next_input_filter(arg, var, &__new_val, _new_val_len, &__new_val_len TSRMLS_CC)) {
+			new_val = __new_val;
+			_new_val_len = __new_val_len;
+		}
+	}
+	*new_val_len = _new_val_len;
+	*val = new_val;
+	return 1;
+}
+
+static unsigned int php_mb2_sapi_filter_init(TSRMLS_D)
+{
+	if (php_mb2_next_input_filter_init) {
+		php_mb2_next_input_filter_init(TSRMLS_C);
+	}
+}
+
+static php_mb2_register_sapi_filter(TSRMLS_C)
+{
+	php_mb2_next_input_filter_init = sapi_module.input_filter_init;
+	php_mb2_next_input_filter = sapi_module.input_filter;
+	sapi_register_input_filter(php_mb2_sapi_filter, php_mb2_sapi_filter_init);
+}
+
+static php_mb2_unregister_sapi_filter(TSRMLS_C)
+{
+	sapi_module.input_filter_init = php_mb2_next_input_filter_init;
+	sapi_module.input_filter = php_mb2_next_input_filter;
 }
 
 #endif	/* HAVE_MBSTRING */
