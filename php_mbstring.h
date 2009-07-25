@@ -66,6 +66,26 @@ typedef struct {
     int persistent:1;
 } php_mb2_char_ptr_list;
 
+typedef struct php_mb2_uconverter_callback_ctx {
+	char *dbuf;
+	char *pdl;
+	int persistent;
+	const UChar *subst_char_u;
+	int32_t subst_char_u_len;
+#ifdef ZTS
+	TSRMLS_D;
+#endif
+} php_mb2_uconverter_callback_ctx;
+
+typedef struct php_mb2_output_handler_ctx {
+    size_t pvbuf_basic_len;
+    UConverter *from_conv;
+    UConverter *to_conv;
+    php_mb2_uconverter_callback_ctx ctx;
+    UChar *pvbuf;
+    UChar *ppvs, *ppvd;
+} php_mb2_output_handler_ctx;
+
 ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
     struct {
         char *locale;
@@ -79,6 +99,7 @@ ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
     } ini;
     struct {
         int in_ucnv_error_handler;
+        php_mb2_output_handler_ctx output_handler;
     } runtime;
 ZEND_END_MODULE_GLOBALS(mbstring_ng)
 

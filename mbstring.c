@@ -31,6 +31,7 @@
 #include <unicode/uloc.h>
 #include <unicode/ucsdet.h>
 #include <unicode/ustring.h>
+#include <unicode/uregex.h>
 
 #include "php.h"
 #include "php_variables.h"
@@ -56,6 +57,13 @@
 	STD_PHP_INI_ENTRY("mbstring2." name, default_value, flags, handler, field, type, global)
 #define STD_PHP_MB_INI_BOOLEAN(name, default_value, flags, handler, field, type, global) \
 	STD_PHP_INI_BOOLEAN("mbstring2." name, default_value, flags, handler, field, type, global)
+
+typedef struct php_mb2_mime_type_buf {
+	char *charset;
+	size_t charset_len;
+	char *type;
+	size_t type_len;
+} php_mb2_mime_type_buf;
 
 ZEND_DECLARE_MODULE_GLOBALS(mbstring_ng);
 static PHP_GINIT_FUNCTION(mbstring_ng);
@@ -121,6 +129,11 @@ static unsigned int php_mb2_sapi_filter(int arg, char *var, char **val, unsigned
 static unsigned int php_mb2_sapi_filter_init(TSRMLS_D);
 static php_mb2_register_sapi_filter(TSRMLS_C);
 static php_mb2_unregister_sapi_filter(TSRMLS_C);
+static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverterFromUnicodeArgs *args, UChar *units, int32_t length, UChar32 codePoint, UConverterCallbackReason reason, UErrorCode *err);
+static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterToUnicodeArgs *args, const char *units, int32_t length, UConverterCallbackReason reason, UErrorCode *err);
+static int php_mb2_parse_mime_type(php_mb2_mime_type_buf *retval, const char *header, size_t header_len);
+static void php_mb2_mime_type_buf_dtor(php_mb2_mime_type_buf *buf);
+
 
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_internal_encoding, 0, 0, 0)
@@ -429,6 +442,14 @@ static PHP_GINIT_FUNCTION(mbstring_ng)
 	mbstring_ng_globals->ini.locale = NULL;
 	mbstring_ng_globals->ini.internal_encoding = NULL;
 	mbstring_ng_globals->ini.http_output = NULL;
+
+	{
+		php_mb2_output_handler_ctx *ctx = &mbstring_ng_globals->runtime.output_handler;
+
+		ctx->pvbuf = NULL;
+		ctx->from_conv = NULL;
+		ctx->to_conv = NULL;
+	}
 }
 /* }}} */
 
@@ -438,6 +459,22 @@ static unsigned int (*php_mb2_next_input_filter_init)(TSRMLS_D);
 /* {{{ PHP_GSHUTDOWN_FUNCTION */
 static PHP_GSHUTDOWN_FUNCTION(mbstring_ng)
 {
+	{
+		php_mb2_output_handler_ctx *ctx = &mbstring_ng_globals->runtime.output_handler;
+
+		if (ctx->pvbuf) {
+			efree(ctx->pvbuf);
+		}
+
+		if (ctx->from_conv) {
+			ucnv_close(ctx->from_conv);
+		}
+
+		if (ctx->to_conv) {
+			ucnv_close(ctx->to_conv);
+		}
+	}
+
 	php_mb2_ustring_dtor(&mbstring_ng_globals->ini.substitute_character);
 	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.http_input);
 	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.detect_order);
@@ -474,6 +511,24 @@ static PHP_RINIT_FUNCTION(mbstring_ng)
 /* {{{ PHP_RSHUTDOWN_FUNCTION(mbstring_ng) */
 static PHP_RSHUTDOWN_FUNCTION(mbstring_ng)
 {
+	{
+		php_mb2_output_handler_ctx *ctx = &MBSTR_NG(runtime).output_handler;
+
+		if (ctx->pvbuf) {
+			efree(ctx->pvbuf);
+			ctx->pvbuf = NULL;
+		}
+
+		if (ctx->from_conv) {
+			ucnv_close(ctx->from_conv);
+			ctx->from_conv = NULL;
+		}
+
+		if (ctx->to_conv) {
+			ucnv_close(ctx->to_conv);
+			ctx->to_conv = NULL;
+		}
+	}
 	return SUCCESS;
 }
 /* }}} */
@@ -625,12 +680,220 @@ PHP_MB_FUNCTION(parse_str)
    Returns string in output buffer converted to the http_output encoding */
 PHP_MB_FUNCTION(output_handler)
 {
-	char *arg_string;
-	int arg_string_len;
-	long arg_status;
+	size_t chunk_len = 4096;
+	const char *string;
+	int string_len;
+	long status;
+	UErrorCode err;
+	char *pd;
+	const char *ps, *psl;
+	php_mb2_output_handler_ctx *ctx = &MBSTR_NG(runtime).output_handler;
+	php_mb2_uconverter_callback_ctx *cctx = &ctx->ctx;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl", &arg_string, &arg_string_len, &arg_status) == FAILURE) {
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl", &string, &string_len, &status) == FAILURE) {
 		return;
+	}
+
+	if (OG(ob_nesting_level)) {
+	   	if (OG(active_ob_buffer).chunk_size > 1) {
+			chunk_len = OG(active_ob_buffer).chunk_size;
+		} 
+	}
+
+	ps = string, psl = string + string_len;
+
+	if ((status & PHP_OUTPUT_HANDLER_START)) {
+		php_mb2_mime_type_buf mimetype_buf;
+		const char *in_enc = MBSTR_NG(ini).internal_encoding;
+		const char *out_enc = MBSTR_NG(ini).http_output;
+		UConverter *from_conv, *to_conv;
+		if (out_enc && strcasecmp(out_enc, "pass") == 0 || !*out_enc) {
+			RETURN_FALSE;
+		}
+
+		{
+			const char *mimetype = SG(sapi_headers).mimetype ? SG(sapi_headers).mimetype: (SG(default_mimetype) ? SG(default_mimetype): SAPI_DEFAULT_MIMETYPE);
+			if (SUCCESS == php_mb2_parse_mime_type(&mimetype_buf, mimetype, strlen(mimetype))) {
+				php_mb2_ustring mimetype_u;
+				err = U_ZERO_ERROR;
+				if (SUCCESS == php_mb2_ustring_ctor_from_n(&mimetype_u, mimetype_buf.type, mimetype_buf.type_len, "ASCII", 0)) {
+					URegularExpression *rex = uregex_openC(MBSTR_NG(ini).http_output_conv_mimetypes, UREGEX_CASE_INSENSITIVE, NULL, &err);
+					if (U_FAILURE(err)) {
+						php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to compile the regular expression: %s", MBSTR_NG(ini).http_output_conv_mimetypes);
+					} else {
+						UBool result = FALSE;
+						uregex_setText(rex, mimetype_u.p, mimetype_u.len, &err);
+						if (U_SUCCESS(err)) {
+							result = uregex_lookingAt(rex, 0, &err);
+						}
+						if (U_FAILURE(err)) {
+							php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to match the regular expression");
+						} else {
+							if (!result) {
+								uregex_close(rex);
+								php_mb2_ustring_dtor(&mimetype_u);
+								php_mb2_mime_type_buf_dtor(&mimetype_buf);
+								RETURN_FALSE;
+							}
+						}
+					}
+					uregex_close(rex);
+					php_mb2_ustring_dtor(&mimetype_u);
+				}
+
+				if (!out_enc) {
+					out_enc = mimetype_buf.charset;
+				}
+			}
+		}
+
+		if (!out_enc) {
+			php_mb2_mime_type_buf_dtor(&mimetype_buf);
+			RETURN_FALSE;
+		}
+
+		ctx->to_conv = ctx->from_conv = NULL;
+		ctx->pvbuf = NULL;
+		cctx->dbuf = NULL;
+		cctx->persistent = 0;
+		cctx->subst_char_u = MBSTR_NG(ini).substitute_character.p;
+		cctx->subst_char_u_len = MBSTR_NG(ini).substitute_character.len;
+#ifdef ZTS
+		cctx->TSRMLS_C = TSRMLS_C;
+#endif
+		ctx->pvbuf_basic_len = chunk_len;
+
+		if (ctx->pvbuf_basic_len + cctx->subst_char_u_len < ctx->pvbuf_basic_len || sizeof(UChar) * (ctx->pvbuf_basic_len + cctx->subst_char_u_len) / sizeof(UChar) != ctx->pvbuf_basic_len + cctx->subst_char_u_len) {
+			php_mb2_mime_type_buf_dtor(&mimetype_buf);
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer");
+			goto fail;
+		}
+		ctx->ppvs = ctx->ppvd = ctx->pvbuf = safe_emalloc(ctx->pvbuf_basic_len + cctx->subst_char_u_len, sizeof(UChar), 0);
+
+		err = U_ZERO_ERROR;
+		to_conv = ucnv_open(out_enc, &err);
+		php_mb2_mime_type_buf_dtor(&mimetype_buf); /* free the mimetype_buf as it is no longer necessary at this point */
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the encoder for %s (error: %s)", out_enc, u_errorName(err));
+			goto fail;
+		}
+
+		ucnv_setFromUCallBack(to_conv, (UConverterFromUCallback)php_mb2_uconverter_from_unicode_callback, cctx, NULL, NULL, &err);
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to set the callback for the encoder (error: %s)", u_errorName(err));
+			goto fail;
+		}
+
+		err = U_ZERO_ERROR;
+		from_conv = ucnv_open(in_enc, &err);
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to open the decoder for %s (error: %s)", in_enc, u_errorName(err));
+			goto fail;
+		}
+
+		ucnv_setToUCallBack(from_conv, (UConverterToUCallback)php_mb2_uconverter_to_unicode_callback, cctx, NULL, NULL, &err);
+		if (U_FAILURE(err)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to set the callback to the decoder (error: %s)", u_errorName(err));
+			goto fail;
+		}
+
+		ctx->from_conv = from_conv;
+		ctx->to_conv = to_conv;
+
+		cctx->dbuf = emalloc(chunk_len + 1);
+		cctx->pdl = cctx->dbuf + chunk_len;
+		pd = cctx->dbuf;
+		ucnv_convertEx(ctx->to_conv, ctx->from_conv, &pd, cctx->pdl, &ps, psl, ctx->pvbuf, &ctx->ppvs, &ctx->ppvd, ctx->pvbuf + ctx->pvbuf_basic_len, TRUE, FALSE, &err);
+		while (err == U_BUFFER_OVERFLOW_ERROR) {
+			size_t new_dbuf_size;
+			char *new_dbuf;
+			new_dbuf_size = (cctx->pdl - cctx->dbuf) << 1;
+			if (new_dbuf_size + 1 < cctx->pdl - cctx->dbuf || !(new_dbuf = erealloc(cctx->dbuf, new_dbuf_size + 1))) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion results");
+				goto fail;
+			}
+			pd = new_dbuf + (pd - cctx->dbuf);
+			cctx->dbuf = new_dbuf;
+			cctx->pdl = new_dbuf + new_dbuf_size;
+
+			err = U_ZERO_ERROR;
+			ucnv_convertEx(ctx->to_conv, ctx->from_conv, &pd, cctx->pdl, &ps, psl, ctx->pvbuf, &ctx->ppvs, &ctx->ppvd, ctx->pvbuf + ctx->pvbuf_basic_len, FALSE, FALSE, &err);
+		}
+		if (U_FAILURE(err)) {
+			UErrorCode dummy = U_ZERO_ERROR;
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert from %s to %s (error: %s)", ucnv_getName(ctx->from_conv, &dummy), ucnv_getName(ctx->to_conv, &dummy), u_errorName(err));
+			goto fail;
+		}
+	} else {
+		if (!ctx->to_conv || !ctx->from_conv) {
+			RETURN_FALSE;
+		}
+
+		cctx->dbuf = emalloc(chunk_len + 1);
+		cctx->pdl = cctx->dbuf + chunk_len;
+		pd = cctx->dbuf;
+		for (;;) {
+			size_t new_dbuf_size;
+			char *new_dbuf;
+			err = U_ZERO_ERROR;
+			ucnv_convertEx(ctx->to_conv, ctx->from_conv, &pd, cctx->pdl, &ps, psl, ctx->pvbuf, &ctx->ppvs, &ctx->ppvd, ctx->pvbuf + ctx->pvbuf_basic_len, FALSE, TRUE, &err);
+			if (U_SUCCESS(err)) {
+				break;
+			}
+			if (err != U_BUFFER_OVERFLOW_ERROR) {
+				UErrorCode dummy = U_ZERO_ERROR;
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert from %s to %s (error: %s)", ucnv_getName(ctx->from_conv, &dummy), ucnv_getName(ctx->to_conv, &dummy), u_errorName(err));
+				goto fail;
+			}
+			new_dbuf_size = (cctx->pdl - cctx->dbuf) << 1;
+			if (new_dbuf_size + 1 < cctx->pdl - cctx->dbuf || !(new_dbuf = erealloc(cctx->dbuf, new_dbuf_size + 1))) {
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion results");
+				goto fail;
+			}
+			pd = new_dbuf + (pd - cctx->dbuf);
+			cctx->dbuf = new_dbuf;
+			cctx->pdl = new_dbuf + new_dbuf_size;
+		}
+	}
+
+	if ((status & PHP_OUTPUT_HANDLER_END)) {
+		if (ctx->pvbuf) {
+			efree(ctx->pvbuf);
+			ctx->pvbuf = NULL;
+		}
+
+		if (ctx->from_conv) {
+			ucnv_close(ctx->from_conv);
+			ctx->from_conv = NULL;
+		}
+
+		if (ctx->to_conv) {
+			ucnv_close(ctx->to_conv);
+			ctx->to_conv = NULL;
+		}
+	}
+
+	*pd = '\0';
+	RETURN_STRINGL(cctx->dbuf, pd - cctx->dbuf, 0);
+fail:
+	if (cctx->dbuf) {
+		efree(cctx->dbuf);
+		cctx->dbuf = NULL;
+	}
+
+	if (ctx->pvbuf) {
+		efree(ctx->pvbuf);
+		ctx->pvbuf = NULL;
+	}
+
+	if (ctx->from_conv) {
+		ucnv_close(ctx->from_conv);
+		ctx->from_conv = NULL;
+	}
+
+	if (ctx->to_conv) {
+		ucnv_close(ctx->to_conv);
+		ctx->to_conv = NULL;
 	}
 }
 /* }}} */
@@ -2348,18 +2611,6 @@ static const UChar *php_mb2_ustring_roffset(const php_mb2_ustring *ustr, int32_t
 	return p;
 }
 
-
-typedef struct php_mb2_uconverter_callback_ctx {
-	char *dbuf;
-	char *pdl;
-	int persistent;
-	const UChar *subst_char_u;
-	int32_t subst_char_u_len;
-#ifdef ZTS
-	TSRMLS_D;
-#endif
-} php_mb2_uconverter_callback_ctx;
-
 static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverterFromUnicodeArgs *args, UChar *units, int32_t length, UChar32 codePoint, UConverterCallbackReason reason, UErrorCode *err)
 {
 	php_mb2_uconverter_callback_ctx *ctx = (void *)_ctx;
@@ -3081,6 +3332,148 @@ static php_mb2_unregister_sapi_filter(TSRMLS_C)
 {
 	sapi_module.input_filter_init = php_mb2_next_input_filter_init;
 	sapi_module.input_filter = php_mb2_next_input_filter;
+}
+
+static void php_mb2_mime_type_buf_dtor(php_mb2_mime_type_buf *buf)
+{
+	if (buf->charset) {
+		efree(buf->charset);
+	}
+	if (buf->type) {
+		efree(buf->type);
+	}
+}
+
+static int php_mb2_parse_mime_type(php_mb2_mime_type_buf *retval, const char *header, size_t header_len)
+{
+	const char *p = memchr(header, ';', header_len), *pe = header + header_len;
+	{
+		const char *pl = p == NULL ? pe: p;
+		while (pl > header) {
+			pl--;
+			if (*pl != ' ' && *pl != '\t') {
+				pl++;
+				break;
+			}
+		}
+		retval->type_len = pl - header;
+		retval->type = estrndup(header, pl - header);
+	}
+	retval->charset = NULL;
+	retval->charset_len = 0;
+	if (p == NULL) {
+		goto done;
+	}
+	p++;
+	while (p < pe) {
+		char *value;
+		size_t value_len;
+		const char *pks, *pke;
+		for (;;) {
+			if (p == pe) {
+				goto done;
+			}
+			if (*p != ' ' && *p != '\t') {
+				break;
+			}
+			p++;
+		}
+		pks = p;
+		for (;;) {
+			if (p == pe) {
+				goto done;
+			}
+			if (*p == '=') {
+				break;
+			}
+			p++;
+		}
+		{
+			pke = p;
+			while (pke > header) {
+				pke--;
+				if (*pke != ' ' && *pke != '\t') {
+					pke++;
+					break;
+				}
+			}
+		}
+		for (;;) {
+			p++;
+			if (p == pe) {
+				goto done;
+			}
+			if (*p != ' ' && *p != '\t') {
+				break;
+			}
+		}
+		if (*p == '"') {
+			const char *pvs = ++p;
+			for (;;) {
+				if (p == pe) {
+					return FAILURE;
+				}
+				if (*p == '"') {
+					break;
+				}
+				if (*p == '\\') {
+					p++;
+					if (p == pe) {
+						return FAILURE;
+					}
+				}
+				p++;
+			}
+			value = emalloc(p - pvs + 1);
+			{
+				char *pv = value;
+				while (pvs < p) {
+					if (*p == '\\') {
+						p++;
+						assert(p < pvs);
+					}
+					*pv++ = *p++;
+				}
+				*pv = '\0';
+				value_len = pv - value;
+			}
+			p++;
+		} else {
+			const char *pvs = p;
+			for (;;) {
+				p++;
+				if (p == pe || *p == ';' || *p == ' ' || *p == '\t') {
+					break;
+				}
+			}
+			value = estrndup(pvs, p - pvs);
+			value_len = p - pvs;
+		}
+
+		if (pke - pks == sizeof("charset") - 1 && memcmp("charset", pks, sizeof("charset") - 1) == 0) {
+			retval->charset = value;
+			retval->charset_len = value_len;
+		} else {
+			efree(value);
+		}
+
+		for (;;) {
+			if (p == pe) {
+				goto done;
+			}
+			if (*p != ' ' && *p != '\t') {
+				break;
+			}
+			p++;
+		}
+		if (*p != ';') {
+			efree(value);
+			return FAILURE;
+		}
+		p++;
+	}
+done:
+	return SUCCESS;
 }
 
 #endif	/* HAVE_MBSTRING */
