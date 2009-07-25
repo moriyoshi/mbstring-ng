@@ -2480,6 +2480,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 		ps = input;
 		pd = ctx.dbuf;
 
+		ppvs = ppvd = pvbuf;
 		ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + pvbuf_basic_len, TRUE, FALSE, &err);
 		while (err == U_BUFFER_OVERFLOW_ERROR) {
 			size_t new_dbuf_size;
