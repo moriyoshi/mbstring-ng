@@ -12,9 +12,10 @@
    | obtain it through the world-wide-web, please send a note to          |
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
-   | Author: Tsukada Takuya <tsukada@fminn.nagano.nagano.jp>              |
+   | Author: Moriyoshi Koizumi <moriyoshi@php.net>                        |
+   | Based on the work by:                                                |
+   |         Tsukada Takuya <tsukada@fminn.nagano.nagano.jp>              |
    |         Rui Hirokawa <hirokawa@php.net>                              |
-   |         Moriyoshi Koizumi <moriyoshi@php.net>                        |
    +----------------------------------------------------------------------+
  */
 
