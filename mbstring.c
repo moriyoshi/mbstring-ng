@@ -2335,6 +2335,9 @@ static void _php_mb2_regex_init_options(const char *opt_str, size_t opt_str_len,
 		case 'U':
 			flags |= UREGEX_UNIX_LINES;
 			break;
+		case 'W':
+			flags |= UREGEX_UWORD;
+			break;
 		default:
 			break;
 		}
@@ -2401,6 +2404,13 @@ static size_t _php_mb2_regex_get_option_string(char *str, size_t len, uint32_t f
 		if (len_left > 0) {
 			--len_left;
 			*(p++) = 'U';
+		}
+		++len_req;	
+	}
+	if ((flags & UREGEX_UWORD) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'W';
 		}
 		++len_req;	
 	}
