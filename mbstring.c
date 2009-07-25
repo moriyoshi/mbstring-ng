@@ -107,7 +107,6 @@ static PHP_MB_FUNCTION(list_encodings);
 
 static PHP_MB_FUNCTION(ereg);
 static PHP_MB_FUNCTION(ereg_replace);
-static PHP_MB_FUNCTION(eregi_replace);
 static PHP_MB_FUNCTION(split);
 static PHP_MB_FUNCTION(regex_set_options);
 
@@ -284,12 +283,6 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_ereg_replace, 0, 0, 3)
 	ZEND_ARG_INFO(0, option)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_eregi_replace, 0, 0, 3)
-	ZEND_ARG_INFO(0, pattern)
-	ZEND_ARG_INFO(0, replacement)
-	ZEND_ARG_INFO(0, string)
-ZEND_END_ARG_INFO()
-
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_split, 0, 0, 2)
 	ZEND_ARG_INFO(0, pattern)
 	ZEND_ARG_INFO(0, string)
@@ -327,7 +320,6 @@ const zend_function_entry mbstring_ng_functions[] = {
 	PHP_MB_FE(list_encodings,		arginfo_mb_list_encodings)
 	PHP_MB_FE(ereg,					arginfo_mb_ereg)
 	PHP_MB_FE(ereg_replace,			arginfo_mb_ereg_replace)
-	PHP_MB_FE(eregi_replace,		arginfo_mb_eregi_replace)
 	PHP_MB_FE(split,				arginfo_mb_split)
 	PHP_MB_FE(regex_set_options,	arginfo_mb_regex_set_options)
 	{ NULL, NULL, NULL }
@@ -2318,6 +2310,110 @@ PHP_MB_FUNCTION(list_encodings)
 }
 /* }}} */
 
+static void _php_mb2_regex_init_options(const char *opt_str, size_t opt_str_len, uint32_t *retval) 
+{
+	const char *p = opt_str, *pe = opt_str + opt_str_len;
+	uint32_t flags = 0; 
+
+	while (p < pe) {
+		switch (*p) {
+		case 'i':
+			flags |= UREGEX_CASE_INSENSITIVE;
+			break;
+		case 'x':
+			flags |= UREGEX_COMMENTS;
+			break;
+		case 'm':
+			flags |= UREGEX_MULTILINE;
+			break;
+		case 's':
+			flags |= UREGEX_DOTALL;
+			break;
+		case 'p':
+			flags |= UREGEX_MULTILINE | UREGEX_DOTALL;
+			break;
+		default:
+			break;
+		}
+		p++;
+	}
+	*retval = flags;
+}
+
+static size_t _php_mb2_regex_get_option_string(char *str, size_t len, uint32_t flags)
+{
+	size_t len_left = len;
+	size_t len_req = 0;
+	char *p = str;
+	char c;
+
+	if ((flags & UREGEX_CASE_INSENSITIVE) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'i';
+		}
+		++len_req;	
+	}
+
+	if ((flags & UREGEX_COMMENTS) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'x';
+		}
+		++len_req;	
+	}
+
+	if ((flags & (UREGEX_MULTILINE | UREGEX_DOTALL)) ==
+			(UREGEX_MULTILINE | UREGEX_DOTALL)) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'p';
+		}
+		++len_req;	
+	} else {
+		if ((flags & UREGEX_MULTILINE) != 0) {
+			if (len_left > 0) {
+				--len_left;
+				*(p++) = 'm';
+			}
+			++len_req;	
+		}
+
+		if ((flags & UREGEX_DOTALL) != 0) {
+			if (len_left > 0) {
+				--len_left;
+				*(p++) = 's';
+			}
+			++len_req;	
+		}
+	}	
+	if ((flags & UREGEX_CANON_EQ) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'N';
+		}
+		++len_req;	
+	}
+	if ((flags & UREGEX_UNIX_LINES) != 0) {
+		if (len_left > 0) {
+			--len_left;
+			*(p++) = 'U';
+		}
+		++len_req;	
+	}
+
+	if (len_left > 0) {
+		--len_left;
+		*(p++) = '\0';
+	}
+	++len_req;	
+	if (len < len_req) {
+		return len_req;
+	}
+
+	return 0;
+}
+
 /* {{{ proto int mb_ereg(string pattern, string string [, array registers])
    Regular expression match for multibyte string */
 PHP_MB_FUNCTION(ereg)
@@ -2439,13 +2535,108 @@ out:
    Replace regular expression for multibyte string */
 PHP_MB_FUNCTION(ereg_replace)
 {
-}
-/* }}} */
+	char *pattern;
+	int pattern_len;
+	char *string;
+	int string_len;
+	char *replacement;
+	int replacement_len;
+	char *options = NULL;
+	int options_len;
+	URegularExpression *rex;
+	php_mb2_ustring string_u;
+	php_mb2_ustring replacement_u;
+	UErrorCode err;
+	const char *encoding;
+	uint32_t flags;
 
-/* {{{ proto string mb_eregi_replace(string pattern, string replacement, string string)
-   Case insensitive replace regular expression for multibyte string */
-PHP_MB_FUNCTION(eregi_replace)
-{
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sss|s", &pattern, &pattern_len, &replacement, &replacement_len, &string, &string_len, &options, &options_len) == FAILURE) {
+		return;
+	}
+
+	if (options) {
+		_php_mb2_regex_init_options(options, options_len, &flags);
+	} else {
+		flags = MBSTR_NG(runtime).regex_flags;
+	}
+
+	encoding = MBSTR_NG(ini).internal_encoding;
+
+	RETVAL_FALSE;
+
+	rex = php_mb2_regex_open(pattern, pattern_len, encoding, flags TSRMLS_CC);
+	if (!rex) {
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&replacement_u, replacement, replacement_len, encoding, 0)) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the replacement as %s", encoding);
+		return;
+	}
+
+	if (FAILURE == php_mb2_ustring_ctor_from_n(&string_u, string, string_len, encoding, 0)) {
+		php_mb2_ustring_dtor(&replacement_u);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to decode the string as %s", encoding);
+		return;
+	}
+
+	err = U_ZERO_ERROR;
+	uregex_setText(rex, string_u.p, string_u.len, &err);
+	if (U_FAILURE(err)) {
+		/* unlikely */
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+		goto out;
+	}
+
+	uregex_useAnchoringBounds(rex, TRUE, &err);
+	if (U_FAILURE(err)) {
+		/* unlikely */
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Unexpected error (error: %s)", u_errorName(err));
+		goto out;
+	}
+
+	{
+		php_mb2_ustring result_u;
+		int32_t result_u_len;
+		char *result;
+		int32_t result_len;
+		if (FAILURE == php_mb2_ustring_ctor(&result_u, 0)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion result_us");
+			goto out;
+		}
+		if (FAILURE == php_mb2_ustring_reserve(&result_u, string_u.len + replacement_u.len)) {
+			php_mb2_ustring_dtor(&result_u);
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion result_us");
+			goto out;
+		}
+		result_u_len = uregex_replaceAll(rex, replacement_u.p, replacement_u.len, result_u.p, result_u.nalloc, &err);
+		if (err == U_BUFFER_OVERFLOW_ERROR) {
+			if (FAILURE == php_mb2_ustring_reserve(&result_u, result_u_len)) {
+				php_mb2_ustring_dtor(&result_u);
+				php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate the buffer for conversion result_us");
+				goto out;
+			}
+			uregex_replaceAll(rex, replacement_u.p, replacement_u.len, result_u.p, result_u.nalloc, &err);
+		}
+		if (U_FAILURE(err)) {
+			php_mb2_ustring_dtor(&result_u);
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "An error occurred during performing regex replacement (error: %s)", u_errorName(err));
+			goto out;
+		}
+		result_u.len = result_u_len;
+
+		if (FAILURE == php_mb2_encode(result_u.p, result_u.len, encoding, &result, &result_len, 0 TSRMLS_CC)) {
+			php_mb2_ustring_dtor(&result_u);
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "An error occurred during performing regex replacement (error: %s)", u_errorName(err));
+			goto out;
+		}
+
+		php_mb2_ustring_dtor(&result_u);
+		RETVAL_STRINGL(result, result_len, 0);
+	}
+out:
+	php_mb2_ustring_dtor(&string_u);
+	php_mb2_ustring_dtor(&replacement_u);
 }
 /* }}} */
 
@@ -2455,110 +2646,6 @@ PHP_MB_FUNCTION(split)
 {
 }
 /* }}} */
-
-static void _php_mb2_regex_init_options(const char *opt_str, size_t opt_str_len, uint32_t *retval) 
-{
-	const char *p = opt_str, *pe = opt_str + opt_str_len;
-	uint32_t flags = 0; 
-
-	while (p < pe) {
-		switch (*p) {
-		case 'i':
-			flags |= UREGEX_CASE_INSENSITIVE;
-			break;
-		case 'x':
-			flags |= UREGEX_COMMENTS;
-			break;
-		case 'm':
-			flags |= UREGEX_MULTILINE;
-			break;
-		case 's':
-			flags |= UREGEX_DOTALL;
-			break;
-		case 'p':
-			flags |= UREGEX_MULTILINE | UREGEX_DOTALL;
-			break;
-		default:
-			break;
-		}
-		p++;
-	}
-	*retval = flags;
-}
-
-static size_t _php_mb2_regex_get_option_string(char *str, size_t len, uint32_t flags)
-{
-	size_t len_left = len;
-	size_t len_req = 0;
-	char *p = str;
-	char c;
-
-	if ((flags & UREGEX_CASE_INSENSITIVE) != 0) {
-		if (len_left > 0) {
-			--len_left;
-			*(p++) = 'i';
-		}
-		++len_req;	
-	}
-
-	if ((flags & UREGEX_COMMENTS) != 0) {
-		if (len_left > 0) {
-			--len_left;
-			*(p++) = 'x';
-		}
-		++len_req;	
-	}
-
-	if ((flags & (UREGEX_MULTILINE | UREGEX_DOTALL)) ==
-			(UREGEX_MULTILINE | UREGEX_DOTALL)) {
-		if (len_left > 0) {
-			--len_left;
-			*(p++) = 'p';
-		}
-		++len_req;	
-	} else {
-		if ((flags & UREGEX_MULTILINE) != 0) {
-			if (len_left > 0) {
-				--len_left;
-				*(p++) = 'm';
-			}
-			++len_req;	
-		}
-
-		if ((flags & UREGEX_DOTALL) != 0) {
-			if (len_left > 0) {
-				--len_left;
-				*(p++) = 's';
-			}
-			++len_req;	
-		}
-	}	
-	if ((flags & UREGEX_CANON_EQ) != 0) {
-		if (len_left > 0) {
-			--len_left;
-			*(p++) = 'N';
-		}
-		++len_req;	
-	}
-	if ((flags & UREGEX_UNIX_LINES) != 0) {
-		if (len_left > 0) {
-			--len_left;
-			*(p++) = 'U';
-		}
-		++len_req;	
-	}
-
-	if (len_left > 0) {
-		--len_left;
-		*(p++) = '\0';
-	}
-	++len_req;	
-	if (len < len_req) {
-		return len_req;
-	}
-
-	return 0;
-}
 
 /* {{{ proto string mb_regex_set_options([string options])
    Set or get the default options for mbregex functions */
