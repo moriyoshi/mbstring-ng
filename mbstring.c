@@ -2510,7 +2510,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 
 		ucnv_setToUCallBack(from_conv, (UConverterToUCallback)php_mb2_uconverter_to_unicode_callback, &ctx, NULL, NULL, &err);
 		if (U_FAILURE(err)) {
-			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to set the callback to the decoder (error: %s)", *from_encoding, u_errorName(err));
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to set the callback to the decoder (error: %s)", u_errorName(err));
 			goto fail;
 		}
 
