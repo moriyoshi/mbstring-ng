@@ -70,8 +70,10 @@ typedef struct php_mb2_uconverter_callback_ctx {
 	char *dbuf;
 	char *pdl;
 	int persistent;
-	const UChar *subst_char_u;
-	int32_t subst_char_u_len;
+	const UChar *unassigned_subst_char_u;
+	int32_t unassigned_subst_char_u_len;
+	const UChar *illegal_subst_char_u;
+	int32_t illegal_subst_char_u_len;
 #ifdef ZTS
 	TSRMLS_D;
 #endif
@@ -93,7 +95,8 @@ ZEND_BEGIN_MODULE_GLOBALS(mbstring_ng)
         php_mb2_char_ptr_list http_input;
         char *http_output;
         char *internal_encoding;
-        php_mb2_ustring substitute_character;
+        php_mb2_ustring subst_string_unassigned;
+        php_mb2_ustring subst_string_illegal;
         zend_bool encoding_translation;
         char *http_output_conv_mimetypes;
     } ini;

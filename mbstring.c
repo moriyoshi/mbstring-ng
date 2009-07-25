@@ -53,10 +53,14 @@
 
 #define PHP_MB_FUNCTION(name) PHP_FUNCTION(mb2_ ## name)
 #define PHP_MB_FE(name, arginfo) PHP_FE(mb2_ ## name, arginfo)
+#define PHP_MB_INI_ENTRY_NAME(name) "mbstring2." name
 #define STD_PHP_MB_INI_ENTRY(name, default_value, flags, handler, field, type, global) \
-	STD_PHP_INI_ENTRY("mbstring2." name, default_value, flags, handler, field, type, global)
+	STD_PHP_INI_ENTRY(PHP_MB_INI_ENTRY_NAME(name), default_value, flags, handler, field, type, global)
+#define PHP_MB_INI_ENTRY_EX(name, default_value, flags, handler, arg) \
+	PHP_INI_ENTRY_EX(PHP_MB_INI_ENTRY_NAME(name), default_value, flags, handler, arg)
+
 #define STD_PHP_MB_INI_BOOLEAN(name, default_value, flags, handler, field, type, global) \
-	STD_PHP_INI_BOOLEAN("mbstring2." name, default_value, flags, handler, field, type, global)
+	STD_PHP_INI_BOOLEAN(PHP_MB_INI_ENTRY_NAME(name), default_value, flags, handler, field, type, global)
 
 typedef struct php_mb2_mime_type_buf {
 	char *charset;
@@ -76,6 +80,7 @@ static PHP_MINFO_FUNCTION(mbstring_ng);
 
 static PHP_INI_MH(php_mb2_OnUpdateEncodingList);
 static PHP_INI_MH(php_mb2_OnUpdateUnicodeString);
+static PHP_INI_MH(php_mb2_OnUpdate_substitute_character);
 
 static PHP_MB_FUNCTION(strtoupper);
 static PHP_MB_FUNCTION(strtolower);
@@ -416,8 +421,15 @@ PHP_INI_BEGIN()
 	STD_PHP_MB_INI_ENTRY("internal_encoding", "UTF-8", PHP_INI_ALL,
 						OnUpdateString, ini.internal_encoding,
 						zend_mbstring_ng_globals, mbstring_ng_globals)
-	STD_PHP_MB_INI_ENTRY("substitute_character", "?", PHP_INI_ALL,
-						php_mb2_OnUpdateUnicodeString, ini.substitute_character,
+	PHP_MB_INI_ENTRY_EX("substitute_character", "?", PHP_INI_ALL,
+						php_mb2_OnUpdate_substitute_character, NULL)
+	STD_PHP_MB_INI_ENTRY("subst_string_unassigned", "?", PHP_INI_ALL,
+						php_mb2_OnUpdateUnicodeString,
+						ini.subst_string_unassigned,
+						zend_mbstring_ng_globals, mbstring_ng_globals)
+	STD_PHP_MB_INI_ENTRY("subst_string_illegal", "?", PHP_INI_ALL,
+						php_mb2_OnUpdateUnicodeString,
+						ini.subst_string_illegal,
 						zend_mbstring_ng_globals, mbstring_ng_globals)
 	STD_PHP_MB_INI_BOOLEAN("encoding_translation", "0",
 						PHP_INI_SYSTEM | PHP_INI_PERDIR,
@@ -437,7 +449,8 @@ static PHP_GINIT_FUNCTION(mbstring_ng)
 	php_mb2_parse_encoding_list("UTF-8", sizeof("UTF-8") - 1, &mbstring_ng_globals->ini.http_input, 1 TSRMLS_CC);
 	php_mb2_char_ptr_list_ctor(&mbstring_ng_globals->ini.detect_order, 1);
 	php_mb2_char_ptr_list_ctor(&mbstring_ng_globals->ini.http_input, 1);
-	php_mb2_ustring_ctor(&mbstring_ng_globals->ini.substitute_character, 1);
+	php_mb2_ustring_ctor(&mbstring_ng_globals->ini.subst_string_illegal, 1);
+	php_mb2_ustring_ctor(&mbstring_ng_globals->ini.subst_string_unassigned, 1);
 
 	mbstring_ng_globals->ini.locale = NULL;
 	mbstring_ng_globals->ini.internal_encoding = NULL;
@@ -475,7 +488,8 @@ static PHP_GSHUTDOWN_FUNCTION(mbstring_ng)
 		}
 	}
 
-	php_mb2_ustring_dtor(&mbstring_ng_globals->ini.substitute_character);
+	php_mb2_ustring_dtor(&mbstring_ng_globals->ini.subst_string_unassigned);
+	php_mb2_ustring_dtor(&mbstring_ng_globals->ini.subst_string_illegal);
 	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.http_input);
 	php_mb2_char_ptr_list_dtor(&mbstring_ng_globals->ini.detect_order);
 }
@@ -586,6 +600,17 @@ static PHP_INI_MH(php_mb2_OnUpdateUnicodeString)
 	php_mb2_ustring_dtor(p);
 	*p = new_value_ustr;
 
+	return SUCCESS;
+}
+/* }}} */
+
+/* {{{ static PHP_INI_MH(php_mb2_OnUpdate_substitute_character) */
+static PHP_INI_MH(php_mb2_OnUpdate_substitute_character)
+{
+	if (new_value != NULL && stage != PHP_INI_STAGE_DEACTIVATE) {
+		zend_alter_ini_entry(PHP_MB_INI_ENTRY_NAME("subst_string_illegal"), sizeof(PHP_MB_INI_ENTRY_NAME("subst_string_illegal")), new_value, new_value_length, PHP_INI_SYSTEM, stage TSRMLS_CC);
+		zend_alter_ini_entry(PHP_MB_INI_ENTRY_NAME("subst_string_unassigned"), sizeof(PHP_MB_INI_ENTRY_NAME("subst_string_unassigned")), new_value, new_value_length, PHP_INI_SYSTEM, stage TSRMLS_CC);
+	}
 	return SUCCESS;
 }
 /* }}} */
@@ -756,19 +781,21 @@ PHP_MB_FUNCTION(output_handler)
 		ctx->pvbuf = NULL;
 		cctx->dbuf = NULL;
 		cctx->persistent = 0;
-		cctx->subst_char_u = MBSTR_NG(ini).substitute_character.p;
-		cctx->subst_char_u_len = MBSTR_NG(ini).substitute_character.len;
+		cctx->unassigned_subst_char_u = MBSTR_NG(ini).subst_string_unassigned.p;
+		cctx->unassigned_subst_char_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
+		cctx->illegal_subst_char_u = MBSTR_NG(ini).subst_string_illegal.p;
+		cctx->illegal_subst_char_u_len = MBSTR_NG(ini).subst_string_illegal.len;
 #ifdef ZTS
 		cctx->TSRMLS_C = TSRMLS_C;
 #endif
 		ctx->pvbuf_basic_len = chunk_len;
 
-		if (ctx->pvbuf_basic_len + cctx->subst_char_u_len < ctx->pvbuf_basic_len || sizeof(UChar) * (ctx->pvbuf_basic_len + cctx->subst_char_u_len) / sizeof(UChar) != ctx->pvbuf_basic_len + cctx->subst_char_u_len) {
+		if (ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len < ctx->pvbuf_basic_len || sizeof(UChar) * (ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len) / sizeof(UChar) != ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len) {
 			php_mb2_mime_type_buf_dtor(&mimetype_buf);
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer");
 			goto fail;
 		}
-		ctx->ppvs = ctx->ppvd = ctx->pvbuf = safe_emalloc(ctx->pvbuf_basic_len + cctx->subst_char_u_len, sizeof(UChar), 0);
+		ctx->ppvs = ctx->ppvd = ctx->pvbuf = safe_emalloc(ctx->pvbuf_basic_len + cctx->unassigned_subst_char_u_len, sizeof(UChar), 0);
 
 		err = U_ZERO_ERROR;
 		to_conv = ucnv_open(out_enc, &err);
@@ -2620,8 +2647,8 @@ static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverte
 	switch (reason) {
 	case UCNV_UNASSIGNED:
 		php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Unrepresentable character U+%06x", codePoint);
-		if (!MBSTR_NG(runtime).in_ucnv_error_handler) {
-			const UChar *ps = ctx->subst_char_u, *psl = ctx->subst_char_u + ctx->subst_char_u_len;
+		if (ctx->unassigned_subst_char_u && !MBSTR_NG(runtime).in_ucnv_error_handler) {
+			const UChar *ps = ctx->unassigned_subst_char_u, *psl = ctx->unassigned_subst_char_u + ctx->unassigned_subst_char_u_len;
 			MBSTR_NG(runtime).in_ucnv_error_handler = TRUE;
 			for (;;) {
 				size_t new_dbuf_size;
@@ -2645,11 +2672,12 @@ static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverte
 			}
 			MBSTR_NG(runtime).in_ucnv_error_handler = FALSE;
 		}
+		*err = U_ZERO_ERROR;
 		break;
 	case UCNV_IRREGULAR:
 	case UCNV_ILLEGAL:
 		if (!MBSTR_NG(runtime).in_ucnv_error_handler) {
-			const UChar *ps = ctx->subst_char_u, *psl = ctx->subst_char_u + ctx->subst_char_u_len;
+			const UChar *ps = ctx->illegal_subst_char_u, *psl = ctx->illegal_subst_char_u + ctx->illegal_subst_char_u_len;
 			MBSTR_NG(runtime).in_ucnv_error_handler = TRUE;
 			for (;;) {
 				size_t new_dbuf_size;
@@ -2689,11 +2717,11 @@ static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterT
 	case UCNV_UNASSIGNED:
 	case UCNV_IRREGULAR:
 	case UCNV_ILLEGAL:
-		if (args->targetLimit - args->target < ctx->subst_char_u_len) {
-			args->targetLimit = args->target + ctx->subst_char_u_len;
+		if (args->targetLimit - args->target < ctx->illegal_subst_char_u_len) {
+			args->targetLimit = args->target + ctx->illegal_subst_char_u_len;
 		}
-		memmove(args->target, ctx->subst_char_u, sizeof(UChar) * ctx->subst_char_u_len);
-		args->target += ctx->subst_char_u_len;
+		memmove(args->target, ctx->illegal_subst_char_u, sizeof(UChar) * ctx->illegal_subst_char_u_len);
+		args->target += ctx->illegal_subst_char_u_len;
 		*err = U_ZERO_ERROR;
 		break;
 	default:
@@ -2716,18 +2744,20 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 	php_mb2_uconverter_callback_ctx ctx;
 	ctx.dbuf = NULL;
 	ctx.persistent = persistent;
-	ctx.subst_char_u = MBSTR_NG(ini).substitute_character.p;
-	ctx.subst_char_u_len = MBSTR_NG(ini).substitute_character.len;
+	ctx.unassigned_subst_char_u = MBSTR_NG(ini).subst_string_unassigned.p;
+	ctx.unassigned_subst_char_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
+	ctx.illegal_subst_char_u = MBSTR_NG(ini).subst_string_illegal.p;
+	ctx.illegal_subst_char_u_len = MBSTR_NG(ini).subst_string_illegal.len;
 #ifdef ZTS
 	ctx.TSRMLS_C = TSRMLS_C;
 #endif
 	MBSTR_NG(runtime).in_ucnv_error_handler = FALSE;
 
-	if (pvbuf_basic_len + ctx.subst_char_u_len < pvbuf_basic_len || sizeof(UChar) * (pvbuf_basic_len + ctx.subst_char_u_len) / sizeof(UChar) != pvbuf_basic_len + ctx.subst_char_u_len) {
+	if (pvbuf_basic_len + ctx.unassigned_subst_char_u_len < pvbuf_basic_len || sizeof(UChar) * (pvbuf_basic_len + ctx.unassigned_subst_char_u_len) / sizeof(UChar) != pvbuf_basic_len + ctx.unassigned_subst_char_u_len) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer");
 		return FAILURE;
 	}
-	pvbuf = do_alloca_ex(sizeof(UChar) * (pvbuf_basic_len + ctx.subst_char_u_len), 4096, use_heap);
+	pvbuf = do_alloca_ex(sizeof(UChar) * (pvbuf_basic_len + ctx.unassigned_subst_char_u_len), 4096, use_heap);
 
 	to_conv = ucnv_open(to_encoding, &err);
 	if (!to_conv) {
@@ -2864,8 +2894,10 @@ static int php_mb2_encode(const UChar *input, size_t length, const char *to_enco
 	php_mb2_uconverter_callback_ctx ctx;
 	ctx.dbuf = NULL;
 	ctx.persistent = persistent;
-	ctx.subst_char_u = MBSTR_NG(ini).substitute_character.p;
-	ctx.subst_char_u_len = MBSTR_NG(ini).substitute_character.len;
+	ctx.unassigned_subst_char_u = MBSTR_NG(ini).subst_string_unassigned.p;
+	ctx.unassigned_subst_char_u_len = MBSTR_NG(ini).subst_string_unassigned.len;
+	ctx.illegal_subst_char_u = MBSTR_NG(ini).subst_string_illegal.p;
+	ctx.illegal_subst_char_u_len = MBSTR_NG(ini).subst_string_illegal.len;
 #ifdef ZTS
 	TSRMLS_C = TSRMLS_C;
 #endif
