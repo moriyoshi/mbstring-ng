@@ -64,9 +64,9 @@
 
 typedef struct php_mb2_mime_type_buf {
 	char *charset;
-	size_t charset_len;
+	int32_t charset_len;
 	char *type;
-	size_t type_len;
+	int32_t type_len;
 } php_mb2_mime_type_buf;
 
 ZEND_DECLARE_MODULE_GLOBALS(mbstring_ng);
@@ -116,11 +116,11 @@ static void php_mb2_char_ptr_list_ctor(php_mb2_char_ptr_list *list, int persiste
 static void php_mb2_char_ptr_list_dtor(php_mb2_char_ptr_list *list);
 static int php_mb2_char_ptr_list_reserve(php_mb2_char_ptr_list *list, size_t nitems_grow, size_t alloc_size_grow);
 
-static int php_mb2_parse_encoding_list(const char *value, size_t value_length, php_mb2_char_ptr_list *pretval, int persistent);
+static int php_mb2_parse_encoding_list(const char *value, int32_t value_length, php_mb2_char_ptr_list *pretval, int persistent);
 static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pretval TSRMLS_DC);
-static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC);
-static int php_mb2_encode(const UChar *input, size_t length, const char *to_encoding, char **output, size_t *output_len, int persistent TSRMLS_DC);
-static char *php_mb2_detect_encoding(const char *input, size_t length, const char * const *from_encodings, size_t num_from_encodings TSRMLS_DC);
+static int php_mb2_convert_encoding(const char *input, int32_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, int32_t *output_len, int persistent TSRMLS_DC);
+static int php_mb2_encode(const UChar *input, int32_t length, const char *to_encoding, char **output, int32_t *output_len, int persistent TSRMLS_DC);
+static char *php_mb2_detect_encoding(const char *input, int32_t length, const char * const *from_encodings, size_t num_from_encodings TSRMLS_DC);
 static int php_mb2_ustring_ctor(php_mb2_ustring *str, int persistent);
 static int php_mb2_ustring_ctor_from_n(php_mb2_ustring *, const char *str, int32_t len, const char *encoding, int persistent);
 static int php_mb2_ustring_appendu(php_mb2_ustring *, const UChar *ustr, int32_t len);
@@ -1452,7 +1452,7 @@ PHP_MB_FUNCTION(strstr)
 
 		if (p) {
 			char *output;
-			size_t output_len;
+			int32_t output_len;
 			const UChar *start;
 			int32_t len;
 
@@ -1591,7 +1591,7 @@ PHP_MB_FUNCTION(stristr)
 
 		if (p) {
 			char *output;
-			size_t output_len;
+			int32_t output_len;
 			const UChar *start;
 			int32_t len;
 
@@ -1743,7 +1743,7 @@ PHP_MB_FUNCTION(substr)
 
 	{
 		char *output;
-		size_t output_len;
+		int32_t output_len;
 		if (FAILURE == php_mb2_encode(start, len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
 			RETVAL_FALSE;
 		} else {
@@ -1884,7 +1884,7 @@ PHP_MB_FUNCTION(strcut)
 
 	{
 		char *output;
-		size_t output_len;
+		int32_t output_len;
 		if (SUCCESS == php_mb2_encode(result.p, result.len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
 			RETVAL_STRINGL(output, output_len, 0);
 		}
@@ -2139,14 +2139,14 @@ PHP_MB_FUNCTION(strimwidth)
 
 	if (!append_marker) {
 		char *output;
-		size_t output_len;
+		int32_t output_len;
 		if (SUCCESS == php_mb2_encode(start, end - start, encoding, &output, &output_len, 0 TSRMLS_CC)) {
 			RETVAL_STRINGL(output, output_len, 0);
 		}
 	} else {
 		php_mb2_ustring result;
 		char *output;
-		size_t output_len;
+		int32_t output_len;
 
 		if (FAILURE == php_mb2_ustring_ctor(&result, FALSE)) {
 			goto out;
@@ -2197,7 +2197,7 @@ PHP_MB_FUNCTION(convert_encoding)
 
 	{
 		char *result;
-		size_t result_len;
+		int32_t result_len;
 		if (SUCCESS == php_mb2_convert_encoding(str, str_len, to_enc, from_encodings.items, from_encodings.nitems, &result, &result_len, 0 TSRMLS_CC)) {
 			RETVAL_STRINGL(result, result_len, 0);
 		} else {
@@ -2274,7 +2274,7 @@ static void _php_mb2_convert_case(int32_t(*case_conv_func)(UChar *, int32_t, con
 
 	{
 		char *output;
-		size_t output_len;
+		int32_t output_len;
 		if (FAILURE == php_mb2_encode(result.p, result.len, encoding, &output, &output_len, 0 TSRMLS_CC)) {
 			RETVAL_FALSE;
 		} else {
@@ -2437,7 +2437,7 @@ PHP_MB_FUNCTION(ereg)
 		for (i = 0; i <= max_group_idx; i++) {
 			int32_t start, len;
 			char *group;
-			size_t group_len;
+			int32_t group_len;
 
 			start = uregex_start(rex, i, &err);
 
@@ -2846,9 +2846,9 @@ static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterT
 	}
 }
 
-static int php_mb2_convert_encoding(const char *input, size_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, size_t *output_len, int persistent TSRMLS_DC)
+static int php_mb2_convert_encoding(const char *input, int32_t length, const char *to_encoding, const char * const *from_encodings, size_t num_from_encodings, char **output, int32_t *output_len, int persistent TSRMLS_DC)
 {
-	static const size_t pvbuf_basic_len = 1024;
+	static const int32_t pvbuf_basic_len = 1024;
 	UErrorCode err = U_ZERO_ERROR;
 	const char * const*from_encoding, * const*e;
 	UConverter *to_conv = NULL, *from_conv = NULL;
@@ -2918,7 +2918,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 		ppvs = ppvd = pvbuf;
 		ucnv_convertEx(to_conv, from_conv, &pd, ctx.pdl, &ps, psl, pvbuf, &ppvs, &ppvd, pvbuf + pvbuf_basic_len, TRUE, FALSE, &err);
 		while (err == U_BUFFER_OVERFLOW_ERROR) {
-			size_t new_dbuf_size;
+			int32_t new_dbuf_size;
 			char *new_dbuf;
 			new_dbuf_size = (ctx.pdl - ctx.dbuf) << 1;
 			if (new_dbuf_size + 1 < ctx.pdl - ctx.dbuf || !(new_dbuf = perealloc(ctx.dbuf, new_dbuf_size + 1, persistent))) {
@@ -2934,7 +2934,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 		}
 		if (U_SUCCESS(err)) {
 			for (;;) {
-				size_t new_dbuf_size;
+				int32_t new_dbuf_size;
 				char *new_dbuf;
 
 				err = U_ZERO_ERROR;
@@ -3001,7 +3001,7 @@ fail:
 	return FAILURE;
 }
 
-static int php_mb2_encode(const UChar *input, size_t length, const char *to_encoding, char **output, size_t *output_len, int persistent TSRMLS_DC)
+static int php_mb2_encode(const UChar *input, int32_t length, const char *to_encoding, char **output, int32_t *output_len, int persistent TSRMLS_DC)
 {
 	UErrorCode err = U_ZERO_ERROR;
 	UConverter *to_conv = NULL;
@@ -3047,7 +3047,7 @@ static int php_mb2_encode(const UChar *input, size_t length, const char *to_enco
 	pd = ctx.dbuf;
 
 	for (;;) {
-		size_t new_dbuf_size;
+		int32_t new_dbuf_size;
 		char *new_dbuf;
 
 		err = U_ZERO_ERROR;
@@ -3067,7 +3067,7 @@ static int php_mb2_encode(const UChar *input, size_t length, const char *to_enco
 	}
 	if (U_SUCCESS(err)) {
 		for (;;) {
-			size_t new_dbuf_size;
+			int32_t new_dbuf_size;
 			char *new_dbuf;
 
 			err = U_ZERO_ERROR;
@@ -3118,7 +3118,7 @@ static int php_mb2_int32_data_compare(const HashPosition *a, const HashPosition 
 	return av > bv ? -1: av < bv ? 1: 0;
 }
 
-static char *php_mb2_detect_encoding(const char *input, size_t length, const char * const *hint_encodings, size_t num_hint_encodings TSRMLS_DC)
+static char *php_mb2_detect_encoding(const char *input, int32_t length, const char * const *hint_encodings, size_t num_hint_encodings TSRMLS_DC)
 {
 	UErrorCode err = U_ZERO_ERROR;
 	UCharsetDetector *det;
@@ -3225,7 +3225,7 @@ out:
 	return retval;
 }
 
-static int php_mb2_parse_encoding_list(const char *value, size_t value_length, php_mb2_char_ptr_list *pretval, int persistent)
+static int php_mb2_parse_encoding_list(const char *value, int32_t value_length, php_mb2_char_ptr_list *pretval, int persistent)
 {
 	int n;
 	const char *endp, *startp;
@@ -3308,7 +3308,7 @@ static int php_mb2_zval_to_encoding_list(zval *repr, php_mb2_char_ptr_list *pret
 	php_mb2_char_ptr_list retval;
 
 	if (Z_TYPE_P(repr) == IS_STRING) {
-		if (FAILURE == php_mb2_parse_encoding_list(Z_STRVAL_P(repr), (size_t)Z_STRLEN_P(repr), &retval, FALSE)) {
+		if (FAILURE == php_mb2_parse_encoding_list(Z_STRVAL_P(repr), Z_STRLEN_P(repr), &retval, FALSE)) {
 			return FAILURE;
 		}
 	} else if (Z_TYPE_P(repr) == IS_ARRAY) {
@@ -3433,7 +3433,7 @@ static int php_mb2_get_eaw(const UChar *str, int32_t len, zend_bool ambiguous_as
 static unsigned int php_mb2_sapi_filter(int arg, char *var, char **val, unsigned int val_len, unsigned int *new_val_len TSRMLS_DC)
 {
 	char *new_val;
-	size_t _new_val_len;
+	int32_t _new_val_len;
 
 	*new_val_len = val_len;
 
@@ -3449,7 +3449,6 @@ static unsigned int php_mb2_sapi_filter(int arg, char *var, char **val, unsigned
 		return 0;
 	}
 
-	assert((size_t)(unsigned int)_new_val_len == _new_val_len);
 	efree(*val);
 	if (php_mb2_next_input_filter) {
 		char *__new_val = new_val;

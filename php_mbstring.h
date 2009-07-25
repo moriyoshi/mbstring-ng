@@ -80,7 +80,7 @@ typedef struct php_mb2_uconverter_callback_ctx {
 } php_mb2_uconverter_callback_ctx;
 
 typedef struct php_mb2_output_handler_ctx {
-    size_t pvbuf_basic_len;
+    int32_t pvbuf_basic_len;
     UConverter *from_conv;
     UConverter *to_conv;
     php_mb2_uconverter_callback_ctx ctx;
