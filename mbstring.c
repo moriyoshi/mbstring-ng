@@ -110,7 +110,6 @@ static PHP_MB_FUNCTION(eregi);
 static PHP_MB_FUNCTION(ereg_replace);
 static PHP_MB_FUNCTION(eregi_replace);
 static PHP_MB_FUNCTION(split);
-static PHP_MB_FUNCTION(ereg_match);
 
 static void php_mb2_char_ptr_list_ctor(php_mb2_char_ptr_list *list, int persistent);
 static void php_mb2_char_ptr_list_dtor(php_mb2_char_ptr_list *list);
@@ -303,12 +302,6 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_split, 0, 0, 2)
 	ZEND_ARG_INFO(0, limit)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_ereg_match, 0, 0, 2)
-	ZEND_ARG_INFO(0, pattern)
-	ZEND_ARG_INFO(0, string)
-	ZEND_ARG_INFO(0, option)
-ZEND_END_ARG_INFO()
-
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_ereg_search, 0, 0, 0)
 	ZEND_ARG_INFO(0, pattern)
 	ZEND_ARG_INFO(0, option)
@@ -370,7 +363,6 @@ const zend_function_entry mbstring_ng_functions[] = {
 	PHP_MB_FE(ereg_replace,			arginfo_mb_ereg_replace)
 	PHP_MB_FE(eregi_replace,		arginfo_mb_eregi_replace)
 	PHP_MB_FE(split,				arginfo_mb_split)
-	PHP_MB_FE(ereg_match,			arginfo_mb_ereg_match)
 	{ NULL, NULL, NULL }
 };
 /* }}} */
@@ -2505,13 +2497,6 @@ PHP_MB_FUNCTION(eregi_replace)
 /* {{{ proto array mb_split(string pattern, string string [, int limit])
    split multibyte string into array by regular expression */
 PHP_MB_FUNCTION(split)
-{
-}
-/* }}} */
-
-/* {{{ proto bool mb_ereg_match(string pattern, string string [,string option])
-   Regular expression match for multibyte string */
-PHP_MB_FUNCTION(ereg_match)
 {
 }
 /* }}} */
