@@ -1250,7 +1250,7 @@ PHP_MB_FUNCTION(stristr)
 	}
 
 	if (FAILURE == php_mb2_ustring_reserve(&folded_haystack_ustr, haystack_ustr.len)) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer", encoding);
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate a temporary buffer");
 		goto out;
 	}
 
@@ -2473,7 +2473,7 @@ static int php_mb2_convert_encoding(const char *input, size_t length, const char
 	MBSTR_NG(runtime).in_ucnv_error_handler = FALSE;
 
 	if (pvbuf_basic_len + ctx.subst_char_u_len < pvbuf_basic_len || sizeof(UChar) * (pvbuf_basic_len + ctx.subst_char_u_len) / sizeof(UChar) != pvbuf_basic_len + ctx.subst_char_u_len) {
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer", to_encoding, u_errorName(err));
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to allocate temporary buffer");
 		return FAILURE;
 	}
 	pvbuf = do_alloca_ex(sizeof(UChar) * (pvbuf_basic_len + ctx.subst_char_u_len), 4096, use_heap);
