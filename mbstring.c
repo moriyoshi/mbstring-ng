@@ -138,7 +138,7 @@ static void php_mb2_uconverter_from_unicode_callback(const void *_ctx, UConverte
 static void php_mb2_uconverter_to_unicode_callback(const void *_ctx, UConverterToUnicodeArgs *args, const char *units, int32_t length, UConverterCallbackReason reason, UErrorCode *err);
 static int php_mb2_parse_mime_type(php_mb2_mime_type_buf *retval, const char *header, size_t header_len);
 static void php_mb2_mime_type_buf_dtor(php_mb2_mime_type_buf *buf);
-static URegularExpression *php_mb2_regex_open(const char *pattern, int32_t pattern_len, const char *encoding TSRMLS_DC);
+static URegularExpression *php_mb2_regex_open(const char *pattern, int32_t pattern_len, const char *encoding, uint32_t flags TSRMLS_DC);
 
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_internal_encoding, 0, 0, 0)
@@ -2358,9 +2358,7 @@ PHP_MB_FUNCTION(list_encodings)
 }
 /* }}} */
 
-/* {{{ proto int mb_ereg(string pattern, string string [, array registers])
-   Regular expression match for multibyte string */
-PHP_MB_FUNCTION(ereg)
+static void _php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAMETERS, uint32_t flags)
 {
 	char *pattern;
 	int pattern_len;
@@ -2380,7 +2378,7 @@ PHP_MB_FUNCTION(ereg)
 
 	RETVAL_FALSE;
 
-	rex = php_mb2_regex_open(pattern, pattern_len, encoding TSRMLS_CC);
+	rex = php_mb2_regex_open(pattern, pattern_len, encoding, flags TSRMLS_CC);
 	if (!rex) {
 		return;
 	}
@@ -2473,12 +2471,20 @@ PHP_MB_FUNCTION(ereg)
 out:
 	php_mb2_ustring_dtor(&string_u);
 }
+
+/* {{{ proto int mb_ereg(string pattern, string string [, array registers])
+   Regular expression match for multibyte string */
+PHP_MB_FUNCTION(ereg)
+{
+	_php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0);
+}
 /* }}} */
 
 /* {{{ proto int mb_eregi(string pattern, string string [, array registers])
    Case-insensitive regular expression match for multibyte string */
 PHP_MB_FUNCTION(eregi)
 {
+	_php_mb2_regex_ereg_exec(INTERNAL_FUNCTION_PARAM_PASSTHRU, UREGEX_CASE_INSENSITIVE);
 }
 /* }}} */
 
@@ -3662,22 +3668,29 @@ static void php_mb2_zend_hash_remove_first(HashTable *ht)
 	ht->nNumOfElements--;
 }
 
-static URegularExpression *php_mb2_regex_open(const char *pattern, int32_t pattern_len, const char *encoding TSRMLS_DC)
+static URegularExpression *php_mb2_regex_open(const char *pattern, int32_t pattern_len, const char *encoding, uint32_t flags TSRMLS_DC)
 {
 	php_mb2_ustring pattern_u;
 	ulong pattern_hash;
 	URegularExpression *retval = NULL, **tmp_rex;
 	HashTable *regex_cache = &MBSTR_NG(runtime).regex_cache;
+	zend_bool need_update_cache = FALSE;
+
 	if (FAILURE == php_mb2_ustring_ctor_from_n(&pattern_u, pattern, pattern_len, encoding, 0)) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to convert pattern string to Unicode");
 		return NULL;
 	}
 
 	pattern_hash = zend_inline_hash_func((const char *)pattern_u.p, (uint)pattern_u.len);
-	if (FAILURE == zend_hash_quick_find(regex_cache, (const char *)pattern_u.p, (uint)pattern_u.len, pattern_hash, (void **)&tmp_rex)) {
+	{
+		UErrorCode err = U_ZERO_ERROR;
+		need_update_cache = (FAILURE == zend_hash_quick_find(regex_cache, (const char *)pattern_u.p, (uint)pattern_u.len, pattern_hash, (void **)&tmp_rex)) || (uregex_flags(*tmp_rex, &err) != flags || U_FAILURE(err));
+	}
+
+	if (need_update_cache) {
 		UErrorCode err = U_ZERO_ERROR;
 		UParseError parse_err;
-		retval = uregex_open(pattern_u.p, pattern_u.len, 0, &parse_err, &err);
+		retval = uregex_open(pattern_u.p, pattern_u.len, flags, &parse_err, &err);
 		if (U_FAILURE(err)) {
 			zend_bool use_heap;
 			char *tmp = do_alloca(pattern_len + 1, use_heap);
@@ -3696,7 +3709,7 @@ static URegularExpression *php_mb2_regex_open(const char *pattern, int32_t patte
 			/* LRU cache */
 			php_mb2_zend_hash_remove_first(regex_cache);
 		}
-		zend_hash_quick_add(regex_cache, (const char *)pattern_u.p, (uint)pattern_u.len, pattern_hash, &retval, sizeof(retval), NULL);
+		zend_hash_quick_update(regex_cache, (const char *)pattern_u.p, (uint)pattern_u.len, pattern_hash, &retval, sizeof(retval), NULL);
 	} else {
 		retval = *tmp_rex;
 	}
